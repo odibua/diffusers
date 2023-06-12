@@ -185,7 +185,7 @@ extras = {}
 extras = {}
 extras["quality"] = deps_list("urllib3", "black", "isort", "ruff", "hf-doc-builder")
 extras["docs"] = deps_list("hf-doc-builder")
-extras["training"] = deps_list("accelerate", "datasets", "protobuf", "tensorboard", "Jinja2")
+extras["training"] = deps_list("accelerate", "datasets", "protobuf", "tensorboard", "Jinja2", "bitsandbytes")
 extras["test"] = deps_list(
     "compel",
     "datasets",

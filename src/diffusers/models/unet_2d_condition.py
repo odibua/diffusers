@@ -819,6 +819,7 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
             down_block_res_samples = new_down_block_res_samples
 
         # 4. mid
+
         if self.mid_block is not None:
             sample = self.mid_block(
                 sample,

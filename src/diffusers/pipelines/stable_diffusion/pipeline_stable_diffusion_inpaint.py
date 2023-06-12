@@ -152,7 +152,7 @@ def prepare_mask_and_masked_image(image, mask, height, width, return_image: bool
 
     return mask, masked_image
 
-
+#TODO(dibua@): Add clothes as input latent
 class StableDiffusionInpaintPipeline(DiffusionPipeline, TextualInversionLoaderMixin, LoraLoaderMixin):
     r"""
     Pipeline for text-guided image inpainting using Stable Diffusion.
@@ -981,8 +981,10 @@ class StableDiffusionInpaintPipeline(DiffusionPipeline, TextualInversionLoaderMi
         )
         init_image = init_image.to(device=device, dtype=masked_image_latents.dtype)
         init_image = self._encode_vae_image(init_image, generator=generator)
+        #TODO(odibua@): Add clothe latent
 
         # 8. Check that sizes of mask, masked image and latents match
+        # TODO (odibua@): Figure out how to add channel for cloth latent
         if num_channels_unet == 9:
             # default case for runwayml/stable-diffusion-inpainting
             num_channels_mask = mask.shape[1]

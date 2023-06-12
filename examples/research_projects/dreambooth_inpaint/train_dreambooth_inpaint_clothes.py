@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint
 from accelerate import Accelerator
@@ -276,6 +277,13 @@ def parse_args():
             ' `--checkpointing_steps`, or `"latest"` to automatically select the last available checkpoint.'
         ),
     )
+    parser.add_argument(
+        "--add-clothes",
+        action="store_true",
+        help=(
+            "By default this is false, but if placed then it is true"
+        ),
+    )
 
     args = parser.parse_args()
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
@@ -491,11 +499,24 @@ def main():
         tokenizer = CLIPTokenizer.from_pretrained(args.pretrained_model_name_or_path, subfolder="tokenizer")
 
     # Load models and create wrapper for stable diffusion
-    import ipdb
-    ipdb.set_trace()
+
     text_encoder = CLIPTextModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder")
     vae = AutoencoderKL.from_pretrained(args.pretrained_model_name_or_path, subfolder="vae")
     unet = UNet2DConditionModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="unet")
+
+    if args.add_clothes:
+        with torch.no_grad():
+            in_channels = 13
+            block_out_channels = unet.config.block_out_channels
+            conv_in_kernel = unet.config.conv_in_kernel
+            conv_in_padding = (conv_in_kernel - 1) // 2
+            conv_in = nn.Conv2d(
+                in_channels, block_out_channels[0], kernel_size=conv_in_kernel, padding=conv_in_padding
+            )
+            conv_in.weight[:, 4:, :, :] = unet.conv_in.weight
+            unet.conv_in = conv_in
+
+
 
     vae.requires_grad_(False)
     if not args.train_text_encoder:
