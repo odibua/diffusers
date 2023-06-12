@@ -96,11 +96,25 @@ def parse_args():
         help="Pretrained tokenizer name or path if not the same as model_name",
     )
     parser.add_argument(
-        "--instance_data_dir",
+        "--instance_target_dir",
         type=str,
         default=None,
         required=True,
-        help="A folder containing the training data of instance images.",
+        help="A folder containing the training target data of a person with clothes",
+    )
+    parser.add_argument(
+        "--instance_clothes_dir",
+        type=str,
+        default=None,
+        required=True,
+        help="A folder containing the training data of clothes to be fit to the masked out part of the body",
+    )
+    parser.add_argument(
+        "--instance_masks_dir",
+        type=str,
+        default=None,
+        required=True,
+        help="A folder containing the training data of mask that mask out the part of the body to be fit",
     )
     parser.add_argument(
         "--class_data_dir",
@@ -301,7 +315,98 @@ def parse_args():
 
     return args
 
+class ClothesDataset(Dataset):
+    """
+    A dataset to prepare the instance and class images with the prompts for fine-tuning the model.
+    It pre-processes the images and the tokenizes prompts.
+    """
 
+    def __init__(
+        self,
+        instance_target_root,
+        instance_clothes_root,
+        instance_mask_root,
+        instance_prompt,
+        tokenizer,
+        size=512,
+        center_crop=False,
+    ):
+        self.size = size
+        self.center_crop = center_crop
+        self.tokenizer = tokenizer
+
+        self.instance_target_root = Path(instance_target_root)
+        if not self.instance_target_root.exists():
+            raise ValueError("Instance target root doesn't exists.")
+
+        self.instance_clothes_root = Path(instance_clothes_root)
+        if not self.instance_clothes_root.exists():
+            raise ValueError("Instance clothes root doesn't exists.")
+
+        self.instance_mask_root = Path(instance_mask_root)
+        if not self.instance_mask_root.exists():
+            raise ValueError("Instance mask root doesn't exists.")
+
+        self.instance_target_images_path = list(Path(instance_target_root).iterdir())
+        self.instance_clothes_images_path = [Path(instance_clothes_root) / target_image_path.name for target_image_path in self.instance_target_images_path]
+        self.instance_masks_path = [Path(instance_mask_root) / target_image_path.name for target_image_path in self.instance_target_images_path]
+
+        self.num_instance_target_images = len(self.instance_target_images_path)
+        self.num_instance_clothes_images = len(self.instance_clothes_images_path)
+        self.num_instance_masks_images = len(self.instance_masks_path)
+
+        assert self.num_instance_clothes_images == self.num_instance_target_images, "Number of images in clothes directory is not equal to the number of target images"
+        assert self.num_instance_clothes_images == self.num_instance_masks_images, "Number of mask images for inpainting is not equal to the number of target images"
+        
+        self.instance_prompt = instance_prompt
+        self._length = self.num_instance_target_images
+
+        self.image_transforms_resize_and_crop = transforms.Compose(
+            [
+                transforms.Resize(size, interpolation=transforms.InterpolationMode.BILINEAR),
+                transforms.CenterCrop(size) if center_crop else transforms.RandomCrop(size),
+            ]
+        )
+
+        self.image_transforms = transforms.Compose(
+            [
+                transforms.ToTensor(),
+                transforms.Normalize([0.5], [0.5]),
+            ]
+        )
+
+    def __len__(self):
+        return self._length
+
+    def __getitem__(self, index):
+        example = {}
+        index = index % self.num_instance_target_images
+        instance_target_image = Image.open(self.instance_target_images_path[index])
+        instance_clothes = Image.open(self.instance_clothes_images_path[index])
+        instance_masks = Image.open(self.instance_masks_path[index])
+
+        if not instance_target_image.mode == "RGB":
+            instance_target_image = instance_target_image.convert("RGB")
+        if not instance_clothes.mode == "RGB":
+            instance_clothes = instance_clothes.convert("RGB")
+
+        instance_target_image  = self.image_transforms_resize_and_crop(instance_target_image)
+        instance_clothes = self.image_transforms_resize_and_crop(instance_clothes)
+        instance_masks = self.image_transforms_resize_and_crop(instance_masks)
+
+        example["instance_targets"] = instance_target_image
+        example["instance_clothes"] = instance_clothes
+        example["instance_masks"] = instance_masks
+
+        example["instance_prompt_ids"] = self.tokenizer(
+            self.instance_prompt,
+            padding="do_not_pad",
+            truncation=True,
+            max_length=self.tokenizer.model_max_length,
+        ).input_ids
+
+        return example
+    
 class DreamBoothDataset(Dataset):
     """
     A dataset to prepare the instance and class images with the prompts for fine-tuning the model.
@@ -435,52 +540,14 @@ def main():
 
     if args.seed is not None:
         set_seed(args.seed)
-    
-    # TODO (odibua@): Start without using args.with_prior_preservation
-    if args.with_prior_preservation:
-        class_images_dir = Path(args.class_data_dir)
-        if not class_images_dir.exists():
-            class_images_dir.mkdir(parents=True)
-        cur_class_images = len(list(class_images_dir.iterdir()))
 
-        if cur_class_images < args.num_class_images:
-            torch_dtype = torch.float16 if accelerator.device.type == "cuda" else torch.float32
-            pipeline = StableDiffusionInpaintPipeline.from_pretrained(
+    # Get the pipeline that is used for inpainting
+    torch_dtype = torch.float16 if accelerator.device.type == "cuda" else torch.float32
+    pipeline = StableDiffusionInpaintPipeline.from_pretrained(
                 args.pretrained_model_name_or_path, torch_dtype=torch_dtype, safety_checker=None
             )
-            pipeline.set_progress_bar_config(disable=True)
-
-            num_new_images = args.num_class_images - cur_class_images
-            logger.info(f"Number of class images to sample: {num_new_images}.")
-
-            sample_dataset = PromptDataset(args.class_prompt, num_new_images)
-            sample_dataloader = torch.utils.data.DataLoader(
-                sample_dataset, batch_size=args.sample_batch_size, num_workers=1
-            )
-
-            sample_dataloader = accelerator.prepare(sample_dataloader)
-            pipeline.to(accelerator.device)
-            transform_to_pil = transforms.ToPILImage()
-            for example in tqdm(
-                sample_dataloader, desc="Generating class images", disable=not accelerator.is_local_main_process
-            ):
-                bsz = len(example["prompt"])
-                fake_images = torch.rand((3, args.resolution, args.resolution))
-                transform_to_pil = transforms.ToPILImage()
-                fake_pil_images = transform_to_pil(fake_images)
-
-                fake_mask = random_mask((args.resolution, args.resolution), ratio=1, mask_full_image=True)
-
-                images = pipeline(prompt=example["prompt"], mask_image=fake_mask, image=fake_pil_images).images
-
-                for i, image in enumerate(images):
-                    hash_image = hashlib.sha1(image.tobytes()).hexdigest()
-                    image_filename = class_images_dir / f"{example['index'][i] + cur_class_images}-{hash_image}.jpg"
-                    image.save(image_filename)
-
-            del pipeline
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+    pipeline.set_progress_bar_config(disable=True)
+    pipeline.to(accelerator.device)
 
     # Handle the repository creation
     if accelerator.is_main_process:
@@ -506,12 +573,12 @@ def main():
 
     if args.add_clothes:
         with torch.no_grad():
-            in_channels = 13
+            unet.config.in_channels = 13
             block_out_channels = unet.config.block_out_channels
             conv_in_kernel = unet.config.conv_in_kernel
             conv_in_padding = (conv_in_kernel - 1) // 2
             conv_in = nn.Conv2d(
-                in_channels, block_out_channels[0], kernel_size=conv_in_kernel, padding=conv_in_padding
+                unet.config.in_channels, block_out_channels[0], kernel_size=conv_in_kernel, padding=conv_in_padding
             )
             conv_in.weight[:, 4:, :, :] = unet.conv_in.weight
             unet.conv_in = conv_in
@@ -559,11 +626,11 @@ def main():
     noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
 
     # TODO (odibua@): Create Dataset based on clothes, as well as the associated prompt
-    train_dataset = DreamBoothDataset(
-        instance_data_root=args.instance_data_dir,
-        instance_prompt=args.instance_prompt,
-        class_data_root=args.class_data_dir if args.with_prior_preservation else None,
-        class_prompt=args.class_prompt,
+    train_dataset = ClothesDataset(
+        instance_target_root=args.instance_target_dir,
+        instance_clothes_root=args.instant_clothes_dir,
+        instance_mask_root=args.instance_masks_dir,
+        instance_prompt="a person with a shirt",
         tokenizer=tokenizer,
         size=args.resolution,
         center_crop=args.center_crop,
@@ -572,36 +639,19 @@ def main():
     # TODO (odibua@): Check collate_fn based on new dataset
     def collate_fn(examples):
         input_ids = [example["instance_prompt_ids"] for example in examples]
-        pixel_values = [example["instance_images"] for example in examples]
-
-        # Concat class and instance examples for prior preservation.
-        # We do this to avoid doing two forward passes.
-        if args.with_prior_preservation:
-            input_ids += [example["class_prompt_ids"] for example in examples]
-            pixel_values += [example["class_images"] for example in examples]
-            pior_pil = [example["class_PIL_images"] for example in examples]
+        pixel_values = [example["instance_targets"] for example in examples]
+        clothes_pixel_values = [example["instance_clothes"] for example in examples]
 
         masks = []
         masked_images = []
         for example in examples:
-            pil_image = example["PIL_images"]
-            # generate a random mask
-            mask = random_mask(pil_image.size, 1, False)
+            pil_image = example["instance_targets"]
+            mask = example["instance_masks"]
             # prepare mask and masked image
             mask, masked_image = prepare_mask_and_masked_image(pil_image, mask)
 
             masks.append(mask)
             masked_images.append(masked_image)
-
-        if args.with_prior_preservation:
-            for pil_image in pior_pil:
-                # generate a random mask
-                mask = random_mask(pil_image.size, 1, False)
-                # prepare mask and masked image
-                mask, masked_image = prepare_mask_and_masked_image(pil_image, mask)
-
-                masks.append(mask)
-                masked_images.append(masked_image)
 
         pixel_values = torch.stack(pixel_values)
         pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
@@ -609,7 +659,7 @@ def main():
         input_ids = tokenizer.pad({"input_ids": input_ids}, padding=True, return_tensors="pt").input_ids
         masks = torch.stack(masks)
         masked_images = torch.stack(masked_images)
-        batch = {"input_ids": input_ids, "pixel_values": pixel_values, "masks": masks, "masked_images": masked_images}
+        batch = {"input_ids": input_ids, "pixel_values": pixel_values, "clothes_pixel_values": clothes_pixel_values, "masks": masks, "masked_images": masked_images}
         return batch
 
     train_dataloader = torch.utils.data.DataLoader(
