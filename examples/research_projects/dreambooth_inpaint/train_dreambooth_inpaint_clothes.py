@@ -24,7 +24,7 @@ from transformers import CLIPTextModel, CLIPTokenizer
 from diffusers import (
     AutoencoderKL,
     DDPMScheduler,
-    StableDiffusionInpaintPipeline,
+    StableDiffusionInpaintClothesPipeline,
     StableDiffusionPipeline,
     UNet2DConditionModel,
 )
@@ -541,14 +541,6 @@ def main():
     if args.seed is not None:
         set_seed(args.seed)
 
-    # Get the pipeline that is used for inpainting
-    torch_dtype = torch.float16 if accelerator.device.type == "cuda" else torch.float32
-    pipeline = StableDiffusionInpaintPipeline.from_pretrained(
-                args.pretrained_model_name_or_path, torch_dtype=torch_dtype, safety_checker=None
-            )
-    pipeline.set_progress_bar_config(disable=True)
-    pipeline.to(accelerator.device)
-
     # Handle the repository creation
     if accelerator.is_main_process:
         if args.output_dir is not None:
@@ -566,10 +558,17 @@ def main():
         tokenizer = CLIPTokenizer.from_pretrained(args.pretrained_model_name_or_path, subfolder="tokenizer")
 
     # Load models and create wrapper for stable diffusion
-
     text_encoder = CLIPTextModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder")
     vae = AutoencoderKL.from_pretrained(args.pretrained_model_name_or_path, subfolder="vae")
     unet = UNet2DConditionModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="unet")
+
+    # Get the pipeline that is used for inpainting
+    torch_dtype = torch.float16 if accelerator.device.type == "cuda" else torch.float32
+    pipeline = StableDiffusionInpaintClothesPipeline.from_pretrained(
+                args.pretrained_model_name_or_path, torch_dtype=torch_dtype, safety_checker=None
+            )
+    pipeline.set_progress_bar_config(disable=True)
+    pipeline.to(accelerator.device)
 
     if args.add_clothes:
         with torch.no_grad():
@@ -582,8 +581,6 @@ def main():
             )
             conv_in.weight[:, 4:, :, :] = unet.conv_in.weight
             unet.conv_in = conv_in
-
-
 
     vae.requires_grad_(False)
     if not args.train_text_encoder:
@@ -759,6 +756,7 @@ def main():
 
     for epoch in range(first_epoch, args.num_train_epochs):
         unet.train()
+        pipeline.unet = unet
         for step, batch in enumerate(train_dataloader):
             # Skip steps until we reach the resumed step
             if args.resume_from_checkpoint and epoch == first_epoch and step < resume_step:
@@ -772,51 +770,19 @@ def main():
                 latents = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
                 latents = latents * vae.config.scaling_factor
 
-                # Convert masked images to latent space
-                masked_latents = vae.encode(
-                    batch["masked_images"].reshape(batch["pixel_values"].shape).to(dtype=weight_dtype)
-                ).latent_dist.sample()
-                masked_latents = masked_latents * vae.config.scaling_factor
+                clothes_latents = vae.encode(batch["clothes_pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
+                clothes_latents = clothes_latents * vae.config.scaling_factor
 
-                masks = batch["masks"]
-                # resize the mask to latents shape as we concatenate the mask to the latents
-                mask = torch.stack(
-                    [
-                        torch.nn.functional.interpolate(mask, size=(args.resolution // 8, args.resolution // 8))
-                        for mask in masks
-                    ]
-                )
-                mask = mask.reshape(-1, 1, args.resolution // 8, args.resolution // 8)
-
-                # Sample noise that we'll add to the latents
-                noise = torch.randn_like(latents)
-                bsz = latents.shape[0]
-                # Sample a random timestep for each image
-                timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
-                timesteps = timesteps.long()
-
-                # Add noise to the latents according to the noise magnitude at each timestep
-                # (this is the forward diffusion process)
-                # TODO (dibua@): Add noise to the cloth latent
-                # TODO (dibua@): Add image latent and clothe latent together
-                noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
-
-                # concatenate the noised latents with the mask and the masked latents
-                # TODO (odibua@): Concatenate clothe latent
-                latent_model_input = torch.cat([noisy_latents, mask, masked_latents], dim=1)
-                # Get the text embedding for conditioning
-                encoder_hidden_states = text_encoder(batch["input_ids"])[0]
-
-                # Predict the noise residual
-                noise_pred = unet(latent_model_input, timesteps, encoder_hidden_states).sample
-
-                # Get the target for loss depending on the prediction type
-                if noise_scheduler.config.prediction_type == "epsilon":
-                    target = noise
-                elif noise_scheduler.config.prediction_type == "v_prediction":
-                    target = noise_scheduler.get_velocity(latents, noise, timesteps)
-                else:
-                    raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
+                image, _ = pipeline(
+                    prompt="a person with a shirt", 
+                    image=batch["pixel_values"], 
+                    mask_image=batch["masked_images"],
+                    latents=latents,
+                    clothes_latents=clothes_latents,
+                    return_dict=True,
+                    output_type="pt"
+                    )
+                
 
                 if args.with_prior_preservation:
                     # Chunk the noise and noise_pred into two parts and compute the loss on each part separately.
@@ -870,13 +836,7 @@ def main():
 
     # Create the pipeline using using the trained modules and save it.
     if accelerator.is_main_process:
-        pipeline = StableDiffusionPipeline.from_pretrained(
-            args.pretrained_model_name_or_path,
-            unet=accelerator.unwrap_model(unet),
-            text_encoder=accelerator.unwrap_model(text_encoder),
-        )
         pipeline.save_pretrained(args.output_dir)
-
         if args.push_to_hub:
             upload_folder(
                 repo_id=repo_id,

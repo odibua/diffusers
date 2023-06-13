@@ -733,7 +733,7 @@ def main():
                 # concatenate the noised latents with the mask and the masked latents
                 # TODO (odibua@): Concatenate clothe latent
                 latent_model_input = torch.cat([noisy_latents, mask, masked_latents], dim=1)
-                latent_model_input = torch.cat([noisy_latents, noisy_latents, mask, masked_latents], dim=1)
+                
                 # Get the text embedding for conditioning
                 encoder_hidden_states = text_encoder(batch["input_ids"])[0]
 
