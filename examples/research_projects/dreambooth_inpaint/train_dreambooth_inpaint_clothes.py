@@ -6,20 +6,21 @@ import os
 import random
 from pathlib import Path
 
-import numpy as np
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import torch.utils.checkpoint
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
 from huggingface_hub import create_repo, upload_folder
+import numpy as np
 from PIL import Image, ImageDraw
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.utils.checkpoint
 from torch.utils.data import Dataset
+from torchmetrics import StructuralSimilarityIndexMeasure
 from torchvision import transforms
-from tqdm.auto import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer
+from tqdm.auto import tqdm
 
 from diffusers import (
     AutoencoderKL,
@@ -670,13 +671,6 @@ def main():
         args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
         overrode_max_train_steps = True
 
-    lr_scheduler = get_scheduler(
-        args.lr_scheduler,
-        optimizer=optimizer,
-        num_warmup_steps=args.lr_warmup_steps * args.gradient_accumulation_steps,
-        num_training_steps=args.max_train_steps * args.gradient_accumulation_steps,
-    )
-
     if args.train_text_encoder:
         unet, text_encoder, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
             unet, text_encoder, optimizer, train_dataloader, lr_scheduler
@@ -783,25 +777,21 @@ def main():
                     output_type="pt"
                     )
                 
+                l1_loss = F.L1Loss()
+                ssim = StructuralSimilarityIndexMeasure()
 
-                if args.with_prior_preservation:
-                    # Chunk the noise and noise_pred into two parts and compute the loss on each part separately.
-                    noise_pred, noise_pred_prior = torch.chunk(noise_pred, 2, dim=0)
-                    target, target_prior = torch.chunk(target, 2, dim=0)
-
-                    # Compute instance loss
-                    loss = F.mse_loss(noise_pred.float(), target.float(), reduction="none").mean([1, 2, 3]).mean()
-
-                    # Compute prior loss
-                    prior_loss = F.mse_loss(noise_pred_prior.float(), target_prior.float(), reduction="mean")
-
-                    # Add the prior loss to the instance loss.
-                    loss = loss + args.prior_loss_weight * prior_loss
-                else:
-                    loss = F.mse_loss(noise_pred.float(), target.float(), reduction="mean")
+                # TODO (odibua@): Update to have l1 loss between images
+                loss = l1_loss(image, batch["pixel_values"])
                 # TODO (odibua@): Update loss to include SSIM between final image and image with clothes. https://torchmetrics.readthedocs.io/en/stable/image/structural_similarity.html
-                # TODO (odibua@): Add softmax pixelwise loss to two images
-                # TODO (odibua@): Add Perception loss (MDF https://github.com/gfxdisp/mdf) or VGG (https://gist.github.com/alper111/8233cdb0414b4cb5853f2f730ab95a49)
+                loss = loss + ssim(image, batch["pixel_values"])
+
+                
+                
+                # TODO (odibua@): LATER: Add Perception loss  VGG (https://gist.github.com/alper111/8233cdb0414b4cb5853f2f730ab95a49)
+                # TODOD (odibua@): LATER: Test perception loss (MDF https://github.com/gfxdisp/mdf)
+                # TODO (odibua@): LATER: Test segmentation loss (pixelwise softmax)
+                # TODO (odibua@): LATER: Test loss based on joints
+                # TODO (odibua@): LATER: Update to have adverserial loss
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
                     params_to_clip = (
@@ -811,7 +801,6 @@ def main():
                     )
                     accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
                 optimizer.step()
-                lr_scheduler.step()
                 optimizer.zero_grad()
 
             # Checks if the accelerator has performed an optimization step behind the scenes
@@ -825,7 +814,7 @@ def main():
                         accelerator.save_state(save_path)
                         logger.info(f"Saved state to {save_path}")
 
-            logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
+            logs = {"loss": loss.detach().item()}
             progress_bar.set_postfix(**logs)
             accelerator.log(logs, step=global_step)
 
