@@ -142,6 +142,12 @@ def parse_args():
         action="store_true",
         help="Flag to add prior preservation loss.",
     )
+    parser.add_argument(
+        "--add_clothes",
+        default=False,
+        action="store_true",
+        help="Flag to add prior preservation loss.",
+    )
     parser.add_argument("--prior_loss_weight", type=float, default=1.0, help="The weight of prior preservation loss.")
     parser.add_argument(
         "--num_class_images",
@@ -305,14 +311,14 @@ def parse_args():
     if env_local_rank != -1 and env_local_rank != args.local_rank:
         args.local_rank = env_local_rank
 
-    if args.instance_data_dir is None:
-        raise ValueError("You must specify a train data directory.")
+    if args.instance_target_dir is None:
+        raise ValueError("You must specify a train target data directory.")
+    
+    if args.instance_clothes_dir is None:
+        raise ValueError("You must specify a train clothes data directory.")
 
-    if args.with_prior_preservation:
-        if args.class_data_dir is None:
-            raise ValueError("You must specify a data directory for class images.")
-        if args.class_prompt is None:
-            raise ValueError("You must specify prompt for class images.")
+    if args.instance_masks_dir is None:
+        raise ValueError("You must specify a train mask data directory.")
 
     return args
 
@@ -348,16 +354,16 @@ class ClothesDataset(Dataset):
         if not self.instance_mask_root.exists():
             raise ValueError("Instance mask root doesn't exists.")
 
-        self.instance_target_images_path = list(Path(instance_target_root).iterdir())
-        self.instance_clothes_images_path = [Path(instance_clothes_root) / target_image_path.name for target_image_path in self.instance_target_images_path]
-        self.instance_masks_path = [Path(instance_mask_root) / target_image_path.name for target_image_path in self.instance_target_images_path]
+        self.instance_target_images_path = list(Path(instance_target_root).iterdir()) * 500
+        self.instance_clothes_images_path = [Path(instance_clothes_root) / target_image_path.name for target_image_path in self.instance_target_images_path] 
+        self.instance_masks_path = [Path(instance_mask_root) / target_image_path.name for target_image_path in self.instance_target_images_path] 
 
         self.num_instance_target_images = len(self.instance_target_images_path)
         self.num_instance_clothes_images = len(self.instance_clothes_images_path)
         self.num_instance_masks_images = len(self.instance_masks_path)
 
-        assert self.num_instance_clothes_images == self.num_instance_target_images, "Number of images in clothes directory is not equal to the number of target images"
-        assert self.num_instance_clothes_images == self.num_instance_masks_images, "Number of mask images for inpainting is not equal to the number of target images"
+        assert self.num_instance_clothes_images == self.num_instance_target_images, "Number of images in clothes directory: {} is not equal to the number of target images: {}".format(self.num_instance_clothes_images, self.num_instance_target_images)
+        assert self.num_instance_clothes_images == self.num_instance_masks_images, "Number of mask images for inpainting: {} is not equal to the number of target images: {}".format(self.num_instance_clothes_images, self.num_instance_masks_images)
         
         self.instance_prompt = instance_prompt
         self._length = self.num_instance_target_images
@@ -390,14 +396,18 @@ class ClothesDataset(Dataset):
             instance_target_image = instance_target_image.convert("RGB")
         if not instance_clothes.mode == "RGB":
             instance_clothes = instance_clothes.convert("RGB")
+        if not instance_masks.mode == "L":
+            instance_masks = instance_masks.convert("L")
 
         instance_target_image  = self.image_transforms_resize_and_crop(instance_target_image)
         instance_clothes = self.image_transforms_resize_and_crop(instance_clothes)
         instance_masks = self.image_transforms_resize_and_crop(instance_masks)
 
-        example["instance_targets"] = instance_target_image
-        example["instance_clothes"] = instance_clothes
-        example["instance_masks"] = instance_masks
+        example["PIL_instance_targets"] = instance_target_image
+        example["PIL_instance_masks"] = instance_masks
+        example["instance_targets"] = self.image_transforms(instance_target_image)
+        example["instance_clothes"] = self.image_transforms(instance_clothes)
+        example["instance_masks"] = self.image_transforms(instance_masks)
 
         example["instance_prompt_ids"] = self.tokenizer(
             self.instance_prompt,
@@ -573,15 +583,25 @@ def main():
 
     if args.add_clothes:
         with torch.no_grad():
-            unet.config.in_channels = 13
-            block_out_channels = unet.config.block_out_channels
-            conv_in_kernel = unet.config.conv_in_kernel
-            conv_in_padding = (conv_in_kernel - 1) // 2
+            # unet.config.in_channels = 13
+            # block_out_channels = unet.config.block_out_channels
+            # conv_in_kernel = unet.config.conv_in_kernel
+            # conv_in_padding = (conv_in_kernel - 1) // 2
+            # conv_in = nn.Conv2d(
+            #     unet.config.in_channels, block_out_channels[0], kernel_size=conv_in_kernel, padding=conv_in_padding
+            # )
+            # conv_in.weight[:, 4:, :, :] = unet.conv_in.weight
+            # unet.conv_in = conv_in
+            # unet.half()
+            # block_out_channels = unet.config.block_out_channels
+            # conv_in_kernel = unet.config.conv_in_kernel
+            # conv_in_padding = (conv_in_kernel - 1) // 2
             conv_in = nn.Conv2d(
-                unet.config.in_channels, block_out_channels[0], kernel_size=conv_in_kernel, padding=conv_in_padding
+                13, unet.config.in_channels, kernel_size=1
             )
-            conv_in.weight[:, 4:, :, :] = unet.conv_in.weight
-            unet.conv_in = conv_in
+            # unet = nn.Sequential(conv_in, unet)
+            # # unet.conv_in = conv_in
+            # unet.half()
 
     vae.requires_grad_(False)
     if not args.train_text_encoder:
@@ -611,7 +631,7 @@ def main():
         optimizer_class = torch.optim.AdamW
 
     params_to_optimize = (
-        itertools.chain(unet.parameters(), text_encoder.parameters()) if args.train_text_encoder else unet.parameters()
+        itertools.chain(unet.parameters(), text_encoder.parameters()) if args.train_text_encoder else itertools.chain(unet.parameters(), conv_in.parameters())
     )
     optimizer = optimizer_class(
         params_to_optimize,
@@ -626,7 +646,7 @@ def main():
     # TODO (odibua@): Create Dataset based on clothes, as well as the associated prompt
     train_dataset = ClothesDataset(
         instance_target_root=args.instance_target_dir,
-        instance_clothes_root=args.instant_clothes_dir,
+        instance_clothes_root=args.instance_clothes_dir,
         instance_mask_root=args.instance_masks_dir,
         instance_prompt="a person with a shirt",
         tokenizer=tokenizer,
@@ -635,6 +655,7 @@ def main():
     )
 
     # TODO (odibua@): Check collate_fn based on new dataset
+    transform = transforms.Compose([transforms.PILToTensor()])
     def collate_fn(examples):
         input_ids = [example["instance_prompt_ids"] for example in examples]
         pixel_values = [example["instance_targets"] for example in examples]
@@ -643,16 +664,18 @@ def main():
         masks = []
         masked_images = []
         for example in examples:
-            pil_image = example["instance_targets"]
-            mask = example["instance_masks"]
+            pil_image = example["PIL_instance_targets"]
+            mask = example["PIL_instance_masks"]
             # prepare mask and masked image
             mask, masked_image = prepare_mask_and_masked_image(pil_image, mask)
 
             masks.append(mask)
             masked_images.append(masked_image)
-
         pixel_values = torch.stack(pixel_values)
         pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
+
+        clothes_pixel_values = torch.stack(clothes_pixel_values)
+        clothes_pixel_values = clothes_pixel_values.to(memory_format=torch.contiguous_format).float()
 
         input_ids = tokenizer.pad({"input_ids": input_ids}, padding=True, return_tensors="pt").input_ids
         masks = torch.stack(masks)
@@ -672,14 +695,13 @@ def main():
         overrode_max_train_steps = True
 
     if args.train_text_encoder:
-        unet, text_encoder, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-            unet, text_encoder, optimizer, train_dataloader, lr_scheduler
+        unet, text_encoder, optimizer, train_dataloader = accelerator.prepare(
+            unet, text_encoder, optimizer, train_dataloader, 
         )
     else:
-        unet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-            unet, optimizer, train_dataloader, lr_scheduler
+        unet, optimizer, train_dataloader = accelerator.prepare(
+            unet, optimizer, train_dataloader
         )
-    accelerator.register_for_checkpointing(lr_scheduler)
 
     weight_dtype = torch.float32
     if args.mixed_precision == "fp16":
@@ -747,7 +769,6 @@ def main():
     # Only show the progress bar once on each machine.
     progress_bar = tqdm(range(global_step, args.max_train_steps), disable=not accelerator.is_local_main_process)
     progress_bar.set_description("Steps")
-
     for epoch in range(first_epoch, args.num_train_epochs):
         unet.train()
         pipeline.unet = unet
@@ -766,17 +787,19 @@ def main():
 
                 clothes_latents = vae.encode(batch["clothes_pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
                 clothes_latents = clothes_latents * vae.config.scaling_factor
-
+                import ipdb
+                ipdb.set_trace()
                 image, _ = pipeline(
                     prompt="a person with a shirt", 
                     image=batch["pixel_values"], 
-                    mask_image=batch["masked_images"],
+                    mask_image=batch["masks"][0],
                     latents=latents,
                     clothes_latents=clothes_latents,
                     return_dict=True,
                     output_type="pt"
                     )
-                
+                import ipdb
+                ipdb.set_trace()
                 l1_loss = F.L1Loss()
                 ssim = StructuralSimilarityIndexMeasure()
 
@@ -792,6 +815,7 @@ def main():
                 # TODO (odibua@): LATER: Test segmentation loss (pixelwise softmax)
                 # TODO (odibua@): LATER: Test loss based on joints
                 # TODO (odibua@): LATER: Update to have adverserial loss
+
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
                     params_to_clip = (

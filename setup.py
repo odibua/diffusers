@@ -79,6 +79,7 @@ from setuptools import find_packages, setup
 # 2. once modified, run: `make deps_table_update` to update src/diffusers/dependency_versions_table.py
 _deps = [
     "Pillow",  # keep the PIL.Image.Resampling deprecation away
+    "bitsandbytes",
     "accelerate>=0.11.0",
     "compel==0.1.8",
     "black~=23.1",
@@ -111,6 +112,7 @@ _deps = [
     "tensorboard",
     "torch>=1.4",
     "torchvision",
+    "torchmetrics",
     "transformers>=4.25.1",
     "urllib3<=2.0.0",
 ]
@@ -185,7 +187,7 @@ extras = {}
 extras = {}
 extras["quality"] = deps_list("urllib3", "black", "isort", "ruff", "hf-doc-builder")
 extras["docs"] = deps_list("hf-doc-builder")
-extras["training"] = deps_list("accelerate", "datasets", "protobuf", "tensorboard", "Jinja2", "bitsandbytes")
+extras["training"] = deps_list("datasets", "protobuf", "tensorboard", "Jinja2",)
 extras["test"] = deps_list(
     "compel",
     "datasets",
@@ -204,7 +206,7 @@ extras["test"] = deps_list(
     "torchvision",
     "transformers",
 )
-extras["torch"] = deps_list("torch", "accelerate")
+extras["torch"] = deps_list("torch", "accelerate", "transformers", "torchmetrics", "bitsandbytes")
 
 if os.name == "nt":  # windows
     extras["flax"] = []  # jax is not supported on windows

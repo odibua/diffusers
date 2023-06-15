@@ -152,8 +152,7 @@ def prepare_mask_and_masked_image(image, mask, height, width, return_image: bool
 
     return mask, masked_image
 
-#TODO(dibua@): Add clothes as input latent
-class StableDiffusionInpaintPipeline(DiffusionPipeline, TextualInversionLoaderMixin, LoraLoaderMixin):
+class StableDiffusionInpaintClothesPipeline(DiffusionPipeline, TextualInversionLoaderMixin, LoraLoaderMixin):
     r"""
     Pipeline for text-guided image inpainting using Stable Diffusion.
 
@@ -528,10 +527,7 @@ class StableDiffusionInpaintPipeline(DiffusionPipeline, TextualInversionLoaderMi
         if self.safety_checker is None:
             has_nsfw_concept = None
         else:
-            if torch.is_tensor(image):
-                feature_extractor_input = self.image_processor.postprocess(image, output_type="pil")
-            else:
-                feature_extractor_input = self.image_processor.numpy_to_pil(image)
+            feature_extractor_input = self.image_processor.postprocess(image, output_type="pt")
             safety_checker_input = self.feature_extractor(feature_extractor_input, return_tensors="pt").to(device)
             image, has_nsfw_concept = self.safety_checker(
                 images=image, clip_input=safety_checker_input.pixel_values.to(dtype)
@@ -631,6 +627,7 @@ class StableDiffusionInpaintPipeline(DiffusionPipeline, TextualInversionLoaderMi
         device,
         generator,
         latents=None,
+        clothes_latents=None,
         image=None,
         timestep=None,
         is_strength_max=True,
@@ -663,11 +660,13 @@ class StableDiffusionInpaintPipeline(DiffusionPipeline, TextualInversionLoaderMi
         else:
             noise = latents.to(device)
             latents = noise * self.scheduler.init_noise_sigma
+            clothes_noise = clothes_latents.to(device)
+            clothes_latents = clothes_noise * self.scheduler.init_noise_sigma
 
-        outputs = (latents,)
+        outputs = (latents.half(), clothes_latents.half())
 
         if return_noise:
-            outputs += (noise,)
+            outputs += (noise.half(), clothes_noise.half())
 
         if return_image_latents:
             outputs += (image_latents,)
@@ -750,11 +749,12 @@ class StableDiffusionInpaintPipeline(DiffusionPipeline, TextualInversionLoaderMi
         strength: float = 1.0,
         num_inference_steps: int = 50,
         guidance_scale: float = 7.5,
+        latents: torch.FloatTensor = None,
+        clothes_latents: torch.FloatTensor = None,
         negative_prompt: Optional[Union[str, List[str]]] = None,
         num_images_per_prompt: Optional[int] = 1,
         eta: float = 0.0,
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
-        latents: Optional[torch.FloatTensor] = None,
         prompt_embeds: Optional[torch.FloatTensor] = None,
         negative_prompt_embeds: Optional[torch.FloatTensor] = None,
         output_type: Optional[str] = "pil",
@@ -937,6 +937,7 @@ class StableDiffusionInpaintPipeline(DiffusionPipeline, TextualInversionLoaderMi
         is_strength_max = strength == 1.0
 
         # 5. Preprocess mask and image
+
         mask, masked_image, init_image = prepare_mask_and_masked_image(
             image, mask_image, height, width, return_image=True
         )
@@ -955,6 +956,7 @@ class StableDiffusionInpaintPipeline(DiffusionPipeline, TextualInversionLoaderMi
             device,
             generator,
             latents,
+            clothes_latents,
             image=init_image,
             timestep=latent_timestep,
             is_strength_max=is_strength_max,
@@ -965,7 +967,7 @@ class StableDiffusionInpaintPipeline(DiffusionPipeline, TextualInversionLoaderMi
         if return_image_latents:
             latents, noise, image_latents = latents_outputs
         else:
-            latents, noise = latents_outputs
+            latents, clothes_latents, noise, clothes_noise = latents_outputs
 
         # 7. Prepare mask latent variables
         mask, masked_image_latents = self.prepare_mask_latents(
@@ -985,11 +987,11 @@ class StableDiffusionInpaintPipeline(DiffusionPipeline, TextualInversionLoaderMi
 
         # 8. Check that sizes of mask, masked image and latents match
         # TODO (odibua@): Figure out how to add channel for cloth latent
-        if num_channels_unet == 9:
+        if num_channels_unet == 13:
             # default case for runwayml/stable-diffusion-inpainting
             num_channels_mask = mask.shape[1]
             num_channels_masked_image = masked_image_latents.shape[1]
-            if num_channels_latents + num_channels_mask + num_channels_masked_image != self.unet.config.in_channels:
+            if num_channels_latents + num_channels_latents + num_channels_mask + num_channels_masked_image != self.unet.config.in_channels:
                 raise ValueError(
                     f"Incorrect configuration settings! The config of `pipeline.unet`: {self.unet.config} expects"
                     f" {self.unet.config.in_channels} but received `num_channels_latents`: {num_channels_latents} +"
@@ -997,9 +999,9 @@ class StableDiffusionInpaintPipeline(DiffusionPipeline, TextualInversionLoaderMi
                     f" = {num_channels_latents+num_channels_masked_image+num_channels_mask}. Please verify the config of"
                     " `pipeline.unet` or your `mask_image` or `image` input."
                 )
-        elif num_channels_unet != 4:
+        elif num_channels_unet != 13:
             raise ValueError(
-                f"The unet {self.unet.__class__} should have either 4 or 9 input channels, not {self.unet.config.in_channels}."
+                f"The unet {self.unet.__class__} should have 13 input channels, not {self.unet.config.in_channels}."
             )
 
         # 9. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
@@ -1010,23 +1012,25 @@ class StableDiffusionInpaintPipeline(DiffusionPipeline, TextualInversionLoaderMi
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
                 # expand the latents if we are doing classifier free guidance
-                latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
+                latent_model_input = torch.cat([clothes_latents, latents], dim=1)
 
                 # concat latents, mask, masked_image_latents in the channel dimension
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
-                if num_channels_unet == 9:
-                    latent_model_input = torch.cat([latent_model_input, mask, masked_image_latents], dim=1)
+                if num_channels_unet == 13:
+                    latent_model_input = torch.cat([latent_model_input, mask[0].unsqueeze(0), masked_image_latents[0].unsqueeze(0)], dim=1)
 
                 # predict the noise residual
+
                 noise_pred = self.unet(
                     latent_model_input,
-                    t,
+                    t.half(),
                     encoder_hidden_states=prompt_embeds,
                     cross_attention_kwargs=cross_attention_kwargs,
                     return_dict=False,
                 )[0]
-
+                import ipdb
+                ipdb.set_trace()
                 # perform guidance
                 if do_classifier_free_guidance:
                     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
@@ -1072,6 +1076,3 @@ class StableDiffusionInpaintPipeline(DiffusionPipeline, TextualInversionLoaderMi
             return (image, has_nsfw_concept)
 
         return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=has_nsfw_concept)
-
-
-
