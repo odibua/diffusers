@@ -19,7 +19,7 @@ accelerate launch train_dreambooth_inpaint_clothes.py \
   --resolution=512 \
   --train_batch_size=1 \
   --gradient_checkpointing \
-  --learning_rate=5e-7 \
+  --learning_rate=5e-6 \
   --max_train_steps=400 \
   --add_clothes \
-  --mixed_precision="fp16"
+  --mixed_precision="fp16" \
