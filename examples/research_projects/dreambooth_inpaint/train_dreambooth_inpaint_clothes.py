@@ -1,4 +1,5 @@
 import argparse
+from contextlib import nullcontext
 import itertools
 import math
 import os
@@ -33,7 +34,11 @@ from diffusers.utils import randn_tensor
 from .utils import (
     get_collate_function,
     initialize_pipeline_params, 
-    get_models, get_tokenizer, 
+    get_init_latents,
+    get_models, 
+    get_tokenizer, 
+    get_end_loss_functions_dict,
+    get_noise_loss_functions_dict,
     get_training_params, 
     place_on_device, 
     prepare_models_with_accelerator,
@@ -650,98 +655,101 @@ def main():
     progress_bar = tqdm(range(global_step, args.max_train_steps), disable=not accelerator.is_local_main_process)
     progress_bar.set_description("Steps")
 
-
+    # Get parameters that will be used to determine inpainting inference and initialize relevant latens
     num_images_per_prompt, timesteps, batch_size, strength, guidance_scale, generator, negative_prompt, negative_prompt_embeds, cross_attention_kwargs, do_classifier_free_guidance, height, width, text_encoder_lora_scale = initialize_pipeline_params(num_inference_steps=args.num_inference_steps, device=device, pipeline=pipeline, strength=1.0, unet=unet)
 
-    # TODO (odibua@): Module 5 Get loss functions and weights (use dictionary with name mapped to tuple of loss function and weigh)
-    ##########################################################################################
-    noise_loss_function_dict = get_end_loss_functions_dict(mse=True, mse_weight = 1)
-    loss_function_dict = get_loss_functions_dict(ssim=True, l1 = True)
-    alpha_ssim = 4
-    alpha_l1 = 4
-    alpha_noise = 0.5
-    thresh = -1
+    # Get loss functions that are used in denoising loop and at end of denousing loop
+    noise_loss_function_dict = get_noise_loss_functions_dict(mse=True, mse_weight = 1)
+    loss_function_dict = get_end_loss_functions_dict(ssim=True, ssim_weight=4, l1 = True, l1_weight = 0.5)
+    prompt="a person with a shirt"
     ##########################################################################################
     # 5. Preprocess mask and image
     for epoch in range(first_epoch, num_train_epochs):
         for step, batch in enumerate(train_dataloader):
-            unet.train()
-            pipeline.unet = unet
-            prompt="a person with a shirt"
+            if args.clothes_version == 'v1':
+                unet.train()
+                pipeline.unet = unet
+            else:
+                raise NotImplementedError("Training loop not implemented for clothes model version {}".format(args.clothes_version))
             image=batch["pixel_values"]
             mask_image=batch["masks"][0]
             
-            with accelerator.accumulate(unet):
+            with accelerator.accumulate(unet) if args.clothes_version == "v1" else nullcontext() as gs:
+            # with accelerator.accumulate(unet):
                 noise_loss = 0
                 noise_loss_init_dict = {loss_key: 0 for loss_key in noise_loss_function_dict.keys()}
                 logs = { "idx": i, "epoch": epoch, "timestep": t}
                 for i, t in enumerate(timesteps):
                     # print(i, t)
-                    # TODO(odibua@): Module 6 initialize lantents and prompt embeds
-                    ########################################################################
                     if i == 0:
                         prompt_embeds = None 
-                    # with accelerator.accumulate(unet):
-                        prompt_embeds = pipeline._encode_prompt(
-                            prompt,
-                            device,
-                            num_images_per_prompt,
-                            do_classifier_free_guidance,
-                            negative_prompt,
-                            prompt_embeds=prompt_embeds,
-                            negative_prompt_embeds=negative_prompt_embeds,
-                            lora_scale=text_encoder_lora_scale
+                        clothes_latents, latents, mask, masked_image_latents, target_latents = get_init_latents(
+                            vae=vae, pipeline=pipeline, unet=unet, batch=batch, image=image, mask_image=mask_image, height=height, width=width, generator=generator, 
+                            prompt=prompt, device=device, num_images_per_prompt=num_images_per_prompt, do_classifier_free_guidance=do_classifier_free_guidance, strength=strength, 
+                            negative_prompt=negative_prompt, lora_scale=text_encoder_lora_scale, prompt_embeds=prompt_embeds, negative_prompt_embeds=negative_prompt_embeds, t=t, batch_size=batch_size, weight_dtype=weight_dtype, 
                             )
-                        latent_timestep = t.repeat(batch_size * num_images_per_prompt)
-                        # create a boolean to check if the strength is set to 1. if so then initialise the latents with pure noise
-                        is_strength_max = strength == 1.0
-
-                        mask, masked_image, init_image = _prepare_mask_and_masked_image(
-                                        image, mask_image, height, width, return_image=True
-                                    )
-                        
-                        num_channels_latents = vae.config.latent_channels
-                        num_channels_unet = unet.config.in_channels
-                        return_image_latents = num_channels_unet == 4
-
-                        latents = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
-                        latents = latents * vae.config.scaling_factor
-
-                        target_latents = vae.encode(batch["target_pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
-                        target_latents = target_latents * vae.config.scaling_factor
                         noise = randn_tensor(target_latents.shape, generator=generator, device=device, dtype=weight_dtype)
-                        clothes_latents = vae.encode(batch["clothes_pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
-                        clothes_latents = clothes_latents * vae.config.scaling_factor
-                        latents_outputs = pipeline.prepare_latents(
-                                        batch_size * num_images_per_prompt,
-                                        num_channels_latents,
-                                        height,
-                                        width,
-                                        prompt_embeds.dtype,
-                                        device,
-                                        generator,
-                                        latents,
-                                        clothes_latents,
-                                        image=init_image,
-                                        timestep=latent_timestep,
-                                        is_strength_max=is_strength_max,
-                                        return_noise=True,
-                                        return_image_latents=return_image_latents,
-                                    )
+                    # # :
+                    #     prompt_embeds = pipeline._encode_prompt(
+                    #         prompt,
+                    #         device,
+                    #         num_images_per_prompt,
+                    #         do_classifier_free_guidance,
+                    #         negative_prompt,
+                    #         prompt_embeds=prompt_embeds,
+                    #         negative_prompt_embeds=negative_prompt_embeds,
+                    #         lora_scale=text_encoder_lora_scale
+                    #         )
+                    #     latent_timestep = t.repeat(batch_size * num_images_per_prompt)
+                    #     # create a boolean to check if the strength is set to 1. if so then initialise the latents with pure noise
+                    #     is_strength_max = strength == 1.0
 
-                        latents, clothes_latents, _ = latents_outputs
+                    #     mask, masked_image, init_image = _prepare_mask_and_masked_image(
+                    #                     image, mask_image, height, width, return_image=True
+                    #                 )
+                        
+                    #     num_channels_latents = vae.config.latent_channels
+                    #     num_channels_unet = unet.config.in_channels
+                    #     return_image_latents = num_channels_unet == 4
 
-                        mask, masked_image_latents = pipeline.prepare_mask_latents(
-                                            mask,
-                                            masked_image,
-                                            batch_size * num_images_per_prompt,
-                                            height,
-                                            width,
-                                            prompt_embeds.dtype,
-                                            device,
-                                            generator,
-                                            do_classifier_free_guidance,
-                                        )
+                    #     latents = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
+                    #     latents = latents * vae.config.scaling_factor
+
+                    #     target_latents = vae.encode(batch["target_pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
+                    #     target_latents = target_latents * vae.config.scaling_factor
+                    #     noise = randn_tensor(target_latents.shape, generator=generator, device=device, dtype=weight_dtype)
+                    #     clothes_latents = vae.encode(batch["clothes_pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
+                    #     clothes_latents = clothes_latents * vae.config.scaling_factor
+                    #     latents_outputs = pipeline.prepare_latents(
+                    #                     batch_size * num_images_per_prompt,
+                    #                     num_channels_latents,
+                    #                     height,
+                    #                     width,
+                    #                     prompt_embeds.dtype,
+                    #                     device,
+                    #                     generator,
+                    #                     latents,
+                    #                     clothes_latents,
+                    #                     image=init_image,
+                    #                     timestep=latent_timestep,
+                    #                     is_strength_max=is_strength_max,
+                    #                     return_noise=True,
+                    #                     return_image_latents=return_image_latents,
+                    #                 )
+
+                    #     latents, clothes_latents, _ = latents_outputs
+
+                    #     mask, masked_image_latents = pipeline.prepare_mask_latents(
+                    #                         mask,
+                    #                         masked_image,
+                    #                         batch_size * num_images_per_prompt,
+                    #                         height,
+                    #                         width,
+                    #                         prompt_embeds.dtype,
+                    #                         device,
+                    #                         generator,
+                    #                         do_classifier_free_guidance,
+                    #                     )
                         ########################################################################
 
                     latent_model_input = torch.cat([clothes_latents, latents], dim=1)
@@ -787,13 +795,6 @@ def main():
                     _loss = loss_weight * loss_func(latents.float(), _target_latents.float())
                     loss = loss + _loss
                     logs.update({loss_key: _loss})
-                # ssim = StructuralSimilarityIndexMeasure(kernel_size=5).to(device)
-                # ssim_loss = 1 - (1 + ssim(_image.float(), _target.float())) / 2
-                # l1= nn.L1Loss()
-                # l1_loss = l1(_image.float(), _target.float())
-                # # loss = l1_loss
-                # loss = alpha_ssim * ssim_loss + alpha_l1 * l1_loss
-                # loss = alpha_noise * noise_loss + loss
 
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:

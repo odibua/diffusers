@@ -4,7 +4,7 @@ import math
 import os
 import random
 from pathlib import Path
-from typing import Callable, Dict, List, Tuple, Union
+from typing import Callable, Dict, Generator, List, Tuple, Union
 
 from accelerate import Accelerator
 from accelerate.logging import get_logger
@@ -194,8 +194,104 @@ def initialize_pipeline_params(num_inference_steps: int, device: str, pipeline: 
 
     return num_images_per_prompt, timesteps, batch_size, strength, guidance_scale, generator, negative_prompt, negative_prompt_embeds, cross_attention_kwargs, do_classifier_free_guidance, height, width, text_encoder_lora_scale
 
-def get_end_loss_functions_dict(mse: bool =True, mse_weight: float = 1.0) -> Dict[str, Tuple[float, Callable]]:
+def get_noise_loss_functions_dict(mse: bool = True, mse_weight: float = None) -> Dict[str, Tuple[float, Callable]]:
     loss_dict = {}
+
+    
     if mse:
+        def mse_loss(x, y):
+            return F.mse_loss(x, y, reduction="mean")
         mse_weight = mse_weight if mse_weight is not None else 1.0 
-        loss_dict['mse'] = (mse_weight, )
+        loss_dict['mse'] = (mse_weight, mse_loss)
+    
+    return loss_dict
+
+def get_end_loss_functions_dict(device: str, ssim: bool = True, ssim_weight: float = None, l1: bool = True, l1_weight: float = None) -> Dict[str, Callable]:
+    loss_dict = {}
+
+    if ssim:
+        def ssim_func():
+            ssim_loss = StructuralSimilarityIndexMeasure(kernel_size=5).to(device)
+            def calc_loss(x, y):
+                 return 1 - (1 + ssim_loss(x, x)) / 2
+            return calc_loss
+        
+        ssim_weight = ssim_weight if ssim_weight is not None else 1.0 
+        loss_dict['ssim'] = (ssim_weight, ssim_func())
+    
+    if l1:
+        l1 = nn.L1Loss()
+        l1_weight = l1_weight if l1_weight is not None else 1.0
+        loss_dict['l1'] = (l1_weight, l1)
+
+    return loss_dict
+
+def get_init_latents(
+        vae: AutoencoderKL, pipeline: StableDiffusionInpaintClothesPipeline, unet: Callable, batch: Dict[str, torch.tensor],
+        image: torch.tensor, mask_image: torch.tensor, height: float, width: float, generator: Generator, 
+        prompt: str, device: str, num_images_per_prompt: int, do_classifier_free_guidance: bool, strength: float, 
+        negative_prompt: str, lora_scale: Callable, prompt_embeds: torch.tensor, negative_prompt_embeds: torch.tensor, t: int, batch_size: int, weight_dtype: torch.type, 
+        ) -> Tuple[torch.tensor]:
+
+        prompt_embeds = pipeline._encode_prompt(
+        prompt,
+        device,
+        num_images_per_prompt,
+        do_classifier_free_guidance,
+        negative_prompt,
+        prompt_embeds=prompt_embeds,
+        negative_prompt_embeds=negative_prompt_embeds,
+        lora_scale=lora_scale
+        )
+        latent_timestep = t.repeat(batch_size * num_images_per_prompt)
+        # create a boolean to check if the strength is set to 1. if so then initialise the latents with pure noise
+        is_strength_max = strength == 1.0
+
+        mask, masked_image, init_image = _prepare_mask_and_masked_image(
+                        image, mask_image, height, width, return_image=True
+                    )
+        
+        num_channels_latents = vae.config.latent_channels
+        num_channels_unet = unet.config.in_channels
+        return_image_latents = num_channels_unet == 4
+
+        latents = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
+        latents = latents * vae.config.scaling_factor
+
+        target_latents = vae.encode(batch["target_pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
+        target_latents = target_latents * vae.config.scaling_factor
+
+        clothes_latents = vae.encode(batch["clothes_pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
+        clothes_latents = clothes_latents * vae.config.scaling_factor
+        latents_outputs = pipeline.prepare_latents(
+                        batch_size * num_images_per_prompt,
+                        num_channels_latents,
+                        height,
+                        width,
+                        prompt_embeds.dtype,
+                        device,
+                        generator,
+                        latents,
+                        clothes_latents,
+                        image=init_image,
+                        timestep=latent_timestep,
+                        is_strength_max=is_strength_max,
+                        return_noise=True,
+                        return_image_latents=return_image_latents,
+                    )
+
+        latents, clothes_latents, _ = latents_outputs
+
+        mask, masked_image_latents = pipeline.prepare_mask_latents(
+                            mask,
+                            masked_image,
+                            batch_size * num_images_per_prompt,
+                            height,
+                            width,
+                            prompt_embeds.dtype,
+                            device,
+                            generator,
+                            do_classifier_free_guidance,
+                        )
+
+        return clothes_latents, latents, mask, masked_image_latents, target_latents
