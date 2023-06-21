@@ -1,7 +1,6 @@
 import argparse
 from contextlib import nullcontext
 import itertools
-import math
 import os
 import random
 from pathlib import Path
@@ -14,24 +13,14 @@ import numpy as np
 from PIL import Image, ImageDraw
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.utils.checkpoint
 from torch.utils.data import Dataset
-from torchmetrics import StructuralSimilarityIndexMeasure
 from torchvision import transforms
-from transformers import CLIPTextModel, CLIPTokenizer
 from tqdm.auto import tqdm
 
-from diffusers import (
-    AutoencoderKL,
-    DDPMScheduler,
-    StableDiffusionInpaintClothesPipeline,
-    UNet2DConditionModel
-)
 from diffusers.utils import check_min_version
-from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_inpaint_clothes import _prepare_mask_and_masked_image
 from diffusers.utils import randn_tensor
-from .utils import (
+from diffusers.utils.clothes_utils import (
     get_collate_function,
     initialize_pipeline_params, 
     get_init_latents,
@@ -100,7 +89,6 @@ def random_mask(im_shape, ratio=1, mask_full_image=False):
         )
 
     return mask
-
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Simple example of a training script.")
@@ -380,7 +368,6 @@ class ClothesDataset(Dataset):
         self.size = size
         self.center_crop = center_crop
         self.tokenizer = tokenizer
-
         if instance_masked_images_paths is None: 
             self.instance_masked_root = Path(instance_masked_root)
             if not self.instance_masked_root.exists():
@@ -399,9 +386,9 @@ class ClothesDataset(Dataset):
                 raise ValueError("Instance mask root doesn't exists.")
 
             self.instance_target_images_path = list(Path(instance_target_root).iterdir()) * 500
-            self.instance_clothes_images_path = [Path(instance_clothes_root) / target_image_path.name for target_image_path in self.instance_target_images_path] 
-            self.instance_masks_path = [Path(instance_mask_root) / target_image_path.name for target_image_path in self.instance_target_images_path] 
-            self.instance_masked_images_path = [Path(instance_masked_root) / target_image_path.name for target_image_path in self.instance_target_images_path] 
+            instance_clothes_images_paths = [Path(instance_clothes_root) / target_image_path.name for target_image_path in self.instance_target_images_path] 
+            instance_masks_images_paths = [Path(instance_mask_root) / target_image_path.name for target_image_path in self.instance_target_images_path] 
+            instance_masked_images_paths = [Path(instance_masked_root) / target_image_path.name for target_image_path in self.instance_target_images_path] 
         else:
             self.instance_target_images_path = None
 
@@ -489,7 +476,7 @@ def main():
     args = parse_args()
     logging_dir = Path(args.output_dir, args.logging_dir)
 
-    device = accelerator.device
+    # 1) Create accelerator and get device 
     inv_transform = transforms.ToPILImage()
 
     project_config = ProjectConfiguration(
@@ -502,6 +489,8 @@ def main():
         log_with="tensorboard",
         project_config=project_config,
     )
+
+    device = accelerator.device
 
     # Currently, it's not possible to do gradient accumulation when training two models with accelerate.accumulate
     # This will be enabled soon in accelerate. For now, we don't allow gradient accumulation when training two models.
@@ -520,36 +509,34 @@ def main():
         if args.output_dir is not None:
             os.makedirs(args.output_dir, exist_ok=True)
 
+    # 2) Set data type
     weight_dtype = torch.float32
     if args.mixed_precision == "fp16":
         weight_dtype = torch.float16
     elif args.mixed_precision == "bf16":
         weight_dtype = torch.bfloat16
 
-    # Load the tokenizer
+    # 3) Load the tokenizer
     if args.tokenizer_name:
         tokenizer = get_tokenizer(tokenizer_name=args.tokenizer_name)
     elif args.pretrained_model_name_or_path:
         tokenizer = get_tokenizer(pretrained_model_name=args.pretrained_model_name_or_path)
 
-    # Load models and place ones that won't be prepared on device
+    # 4) Load models and place ones that won't be trained on the device
     ###########################################################
     models_dict = get_models(torch_dtype=weight_dtype, pretrained_name=args.pretrained_model_name_or_path, clothes_version=args.clothes_version)
     text_encoder, vae, unet, pipeline = models_dict['text_encoder'], models_dict['vae'], models_dict['unet'], models_dict['pipeline']
 
     vae.requires_grad_(False)
-    if not args.train_text_encoder:
-        text_encoder.requires_grad_(False)
+    text_encoder.requires_grad_(False)
 
     place_on_device(device=device, weight_dtype=weight_dtype, models=[vae, pipeline, pipeline.text_encoder])
     ###########################################################
 
-    # Set parameters for gradient checking and initialize optimizer/params to optimize
+    # 5) Set parameters for gradient checking and initialize optimizer/params to optimize
     ###########################################################
     if args.gradient_checkpointing:
         unet.enable_gradient_checkpointing()
-        if args.train_text_encoder:
-            text_encoder.gradient_checkpointing_enable()
 
     if args.scale_lr:
         args.learning_rate = (
@@ -584,7 +571,7 @@ def main():
     )
     ###########################################################
 
-    # Initialize dataset and dataloader and prepare them along with the relevant models with accelerator
+    # 6) Initialize dataset and dataloader, and prepare them along with the optimizer and unet
     ###########################################################
     collate_fn = get_collate_function(tokenizer)
     train_dataset = ClothesDataset(
@@ -603,7 +590,7 @@ def main():
 
     unet, optimizer, train_dataloader = prepare_models_with_accelerator(accelerator, [unet, optimizer, train_dataloader])
     ###########################################################
-
+    import gc
     # Scheduler and math around the number of training steps.
     num_train_epochs, num_update_steps_per_epoch  = get_training_params(train_dataloader=train_dataloader, gradient_accumulation_steps=args.gradient_accumulation_steps, 
                         max_train_steps=args.max_train_steps, num_train_epochs=args.num_train_epochs)
@@ -655,17 +642,18 @@ def main():
     progress_bar = tqdm(range(global_step, args.max_train_steps), disable=not accelerator.is_local_main_process)
     progress_bar.set_description("Steps")
 
-    # Get parameters that will be used to determine inpainting inference and initialize relevant latens
+    # 7) Get parameters that will be used to determine inpainting inference and to initialize latents
     num_images_per_prompt, timesteps, batch_size, strength, guidance_scale, generator, negative_prompt, negative_prompt_embeds, cross_attention_kwargs, do_classifier_free_guidance, height, width, text_encoder_lora_scale = initialize_pipeline_params(num_inference_steps=args.num_inference_steps, device=device, pipeline=pipeline, strength=1.0, unet=unet)
 
-    # Get loss functions that are used in denoising loop and at end of denousing loop
-    noise_loss_function_dict = get_noise_loss_functions_dict(mse=True, mse_weight = 1)
-    loss_function_dict = get_end_loss_functions_dict(ssim=True, ssim_weight=4, l1 = True, l1_weight = 0.5)
+     # 8) Get loss functions for the noisy loop and the end of the loop
+    noise_loss_function_dict = get_noise_loss_functions_dict(device=device, mse=True, mse_weight = 1)
+    loss_function_dict = get_end_loss_functions_dict(device=device, ssim=True, ssim_weight=4, l1 = True, l1_weight = 0.5)
     prompt="a person with a shirt"
     ##########################################################################################
-    # 5. Preprocess mask and image
+    # 9) Run training loop
     for epoch in range(first_epoch, num_train_epochs):
         for step, batch in enumerate(train_dataloader):
+            # 10) Set relevant model to train
             if args.clothes_version == 'v1':
                 unet.train()
                 pipeline.unet = unet
@@ -675,89 +663,27 @@ def main():
             mask_image=batch["masks"][0]
             
             with accelerator.accumulate(unet) if args.clothes_version == "v1" else nullcontext() as gs:
-            # with accelerator.accumulate(unet):
                 noise_loss = 0
                 noise_loss_init_dict = {loss_key: 0 for loss_key in noise_loss_function_dict.keys()}
-                logs = { "idx": i, "epoch": epoch, "timestep": t}
+                logs = { "idx": None, "epoch": None, "timestep": None}
                 for i, t in enumerate(timesteps):
-                    # print(i, t)
+                    logs["idx"], logs["epoch"], logs["timestep"] = i, epoch, t
                     if i == 0:
+                        # 12) Initialize latents
                         prompt_embeds = None 
-                        clothes_latents, latents, mask, masked_image_latents, target_latents = get_init_latents(
+                        clothes_latents, latents, mask, masked_image_latents, prompt_embeds, target_latents = get_init_latents(
                             vae=vae, pipeline=pipeline, unet=unet, batch=batch, image=image, mask_image=mask_image, height=height, width=width, generator=generator, 
                             prompt=prompt, device=device, num_images_per_prompt=num_images_per_prompt, do_classifier_free_guidance=do_classifier_free_guidance, strength=strength, 
                             negative_prompt=negative_prompt, lora_scale=text_encoder_lora_scale, prompt_embeds=prompt_embeds, negative_prompt_embeds=negative_prompt_embeds, t=t, batch_size=batch_size, weight_dtype=weight_dtype, 
                             )
                         noise = randn_tensor(target_latents.shape, generator=generator, device=device, dtype=weight_dtype)
-                    # # :
-                    #     prompt_embeds = pipeline._encode_prompt(
-                    #         prompt,
-                    #         device,
-                    #         num_images_per_prompt,
-                    #         do_classifier_free_guidance,
-                    #         negative_prompt,
-                    #         prompt_embeds=prompt_embeds,
-                    #         negative_prompt_embeds=negative_prompt_embeds,
-                    #         lora_scale=text_encoder_lora_scale
-                    #         )
-                    #     latent_timestep = t.repeat(batch_size * num_images_per_prompt)
-                    #     # create a boolean to check if the strength is set to 1. if so then initialise the latents with pure noise
-                    #     is_strength_max = strength == 1.0
 
-                    #     mask, masked_image, init_image = _prepare_mask_and_masked_image(
-                    #                     image, mask_image, height, width, return_image=True
-                    #                 )
-                        
-                    #     num_channels_latents = vae.config.latent_channels
-                    #     num_channels_unet = unet.config.in_channels
-                    #     return_image_latents = num_channels_unet == 4
-
-                    #     latents = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
-                    #     latents = latents * vae.config.scaling_factor
-
-                    #     target_latents = vae.encode(batch["target_pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
-                    #     target_latents = target_latents * vae.config.scaling_factor
-                    #     noise = randn_tensor(target_latents.shape, generator=generator, device=device, dtype=weight_dtype)
-                    #     clothes_latents = vae.encode(batch["clothes_pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
-                    #     clothes_latents = clothes_latents * vae.config.scaling_factor
-                    #     latents_outputs = pipeline.prepare_latents(
-                    #                     batch_size * num_images_per_prompt,
-                    #                     num_channels_latents,
-                    #                     height,
-                    #                     width,
-                    #                     prompt_embeds.dtype,
-                    #                     device,
-                    #                     generator,
-                    #                     latents,
-                    #                     clothes_latents,
-                    #                     image=init_image,
-                    #                     timestep=latent_timestep,
-                    #                     is_strength_max=is_strength_max,
-                    #                     return_noise=True,
-                    #                     return_image_latents=return_image_latents,
-                    #                 )
-
-                    #     latents, clothes_latents, _ = latents_outputs
-
-                    #     mask, masked_image_latents = pipeline.prepare_mask_latents(
-                    #                         mask,
-                    #                         masked_image,
-                    #                         batch_size * num_images_per_prompt,
-                    #                         height,
-                    #                         width,
-                    #                         prompt_embeds.dtype,
-                    #                         device,
-                    #                         generator,
-                    #                         do_classifier_free_guidance,
-                    #                     )
-                        ########################################################################
-
+                    # 13) Predict noise from latents and predict previous noisy sample
                     latent_model_input = torch.cat([clothes_latents, latents], dim=1)
                     latent_model_input = torch.cat([latent_model_input] * 2) if do_classifier_free_guidance else latent_model_input
 
-                    latent_model_input = pipeline.scheduler.scale_model_input(latent_model_input, t)#noise_scheduler.scale_model_input(latent_model_input, t)
+                    latent_model_input = pipeline.scheduler.scale_model_input(latent_model_input, t)
 
-                    # if pipeline.unet.config.in_channels == num_in:
                     latent_model_input = torch.cat([latent_model_input, mask, masked_image_latents], dim=1)
                     noise_pred = unet(latent_model_input,
                             t,
@@ -765,7 +691,7 @@ def main():
                             cross_attention_kwargs=cross_attention_kwargs,
                             return_dict=False,
                         )[0]
-                                        # compute the previous noisy sample x_t -> x_t-1
+
                     kwargs = {'eta': 0, 'generator': None}
                     if do_classifier_free_guidance:
                         noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
@@ -774,28 +700,32 @@ def main():
                     clothes_latents = pipeline.scheduler.step(noise_pred, t, clothes_latents, **kwargs, return_dict=False)[0]
                     _target_latents = pipeline.scheduler.add_noise(target_latents, noise, max((t-1, 0))) * pipeline.scheduler.init_noise_sigma
 
+                    # 14) Calculate noisy loss
                     for loss_key in noise_loss_function_dict.keys():
                         loss_weight, loss_func = noise_loss_function_dict[loss_key]
                         noise_loss_init_dict[loss_key] = noise_loss_init_dict[loss_key] + loss_weight * loss_func(latents.float(), _target_latents.float())
 
                 logs.update({loss_key: noise_loss_init_dict[loss_key] for loss_key in noise_loss_init_dict.keys()})
+
+                # 15) Average noisy loss
                 for loss_key in noise_loss_function_dict.keys():
-                    noise_loss = noise_loss + noise_loss_function_dict[loss_key]
+                    noise_loss = noise_loss + noise_loss_init_dict[loss_key]
                 noise_loss = noise_loss / len(timesteps)
+                logs.update({'noise_loss': noise_loss})
 
                 _image =  vae.decode(latents.to(weight_dtype) / vae.config.scaling_factor, return_dict=False)[0]
                 _target = vae.decode(target_latents.to(weight_dtype) / vae.config.scaling_factor, return_dict=False)[0]
                 
 
-                # TODO(odibua@): Add loss functions and weights together. Store in result dict for logging
+                # 16) Calculate loss
                 loss = 0
-                
                 for loss_key in loss_function_dict.keys():
                     loss_weight, loss_func = loss_function_dict[loss_key]
                     _loss = loss_weight * loss_func(latents.float(), _target_latents.float())
                     loss = loss + _loss
                     logs.update({loss_key: _loss})
 
+                # 16) Calculate backward loss
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
                     params_to_clip = (
@@ -812,9 +742,10 @@ def main():
                     # progress_bar.update(1)
                     global_step += 1
 
-                if i == 0 and epoch == 0:
+                # 17) Write columns and save models at checkpointings
+                if epoch == 0:
                     cols = [key for key in logs.keys()]
-                    with open(f"{os.path.join(args.output_dir,'loss_logg.txt')}", "a") as fObj:
+                    with open(f"{os.path.join(args.output_dir,'loss_log.txt')}", "a") as fObj:
                             fObj.write("{}\n".format(','.join(cols)))
                 print(f"{global_step}: {logs} ")
 
@@ -831,7 +762,6 @@ def main():
                         inv_transform(_target[0]).save(target_save_path)
                         inv_transform(_image[0]).save(gen_save_path)
                         logger.info(f"Saved state to {save_path}")
-            
         accelerator.wait_for_everyone()
 
     # Create the pipeline using using the trained modules and save it.

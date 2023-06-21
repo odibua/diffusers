@@ -30,7 +30,7 @@ from diffusers.utils import check_min_version
 from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_inpaint_clothes import _prepare_mask_and_masked_image
 from diffusers.utils import randn_tensor
 from train_dreambooth_inpaint_clothes import ClothesDataset, prepare_mask_and_masked_image
-from .utils import get_tokenizer
+from .clothes_utils import get_tokenizer
 
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
 check_min_version("0.13.0.dev0")
