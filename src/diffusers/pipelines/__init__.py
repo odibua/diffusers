@@ -74,6 +74,7 @@ else:
         StableDiffusionImageVariationPipeline,
         StableDiffusionImg2ImgPipeline,
         StableDiffusionInpaintPipeline,
+        StableDiffusionInpaintClothesPipeline,
         StableDiffusionInpaintPipelineLegacy,
         StableDiffusionInstructPix2PixPipeline,
         StableDiffusionLatentUpscalePipeline,

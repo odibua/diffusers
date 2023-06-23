@@ -950,10 +950,10 @@ class DiffusionPipeline(ConfigMixin):
         )
 
         # DEPRECATED: To be removed in 1.0.0
-        if pipeline_class.__name__ == "StableDiffusionInpaintPipeline" and version.parse(
+        if pipeline_class.__name__ in ["StableDiffusionInpaintPipeline", "StableDiffusionInpaintClothesPipeline"] and version.parse(
             version.parse(config_dict["_diffusers_version"]).base_version
         ) <= version.parse("0.5.1"):
-            from diffusers import StableDiffusionInpaintPipeline, StableDiffusionInpaintPipelineLegacy
+            from diffusers import StableDiffusionInpaintPipeline, StableDiffusionInpaintClothesPipeline, StableDiffusionInpaintPipelineLegacy
 
             pipeline_class = StableDiffusionInpaintPipelineLegacy
 

@@ -427,7 +427,8 @@ def main():
 
     if args.seed is not None:
         set_seed(args.seed)
-
+    
+    # TODO (odibua@): Start without using args.with_prior_preservation
     if args.with_prior_preservation:
         class_images_dir = Path(args.class_data_dir)
         if not class_images_dir.exists():
@@ -490,6 +491,8 @@ def main():
         tokenizer = CLIPTokenizer.from_pretrained(args.pretrained_model_name_or_path, subfolder="tokenizer")
 
     # Load models and create wrapper for stable diffusion
+    import ipdb
+    ipdb.set_trace()
     text_encoder = CLIPTextModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder")
     vae = AutoencoderKL.from_pretrained(args.pretrained_model_name_or_path, subfolder="vae")
     unet = UNet2DConditionModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="unet")
@@ -534,6 +537,7 @@ def main():
 
     noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
 
+    # TODO (odibua@): Create Dataset based on clothes, as well as the associated prompt
     train_dataset = DreamBoothDataset(
         instance_data_root=args.instance_data_dir,
         instance_prompt=args.instance_prompt,
@@ -544,6 +548,7 @@ def main():
         center_crop=args.center_crop,
     )
 
+    # TODO (odibua@): Check collate_fn based on new dataset
     def collate_fn(examples):
         input_ids = [example["instance_prompt_ids"] for example in examples]
         pixel_values = [example["instance_images"] for example in examples]
@@ -692,7 +697,7 @@ def main():
 
             with accelerator.accumulate(unet):
                 # Convert images to latent space
-
+                # TODO (odibua@): Add cloth image as latent 
                 latents = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
                 latents = latents * vae.config.scaling_factor
 
@@ -721,11 +726,13 @@ def main():
 
                 # Add noise to the latents according to the noise magnitude at each timestep
                 # (this is the forward diffusion process)
+                # TODO (dibua@): Add noise to the cloth latent
+                # TODO (dibua@): Add image latent and clothe latent together
                 noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
                 # concatenate the noised latents with the mask and the masked latents
+                # TODO (odibua@): Concatenate clothe latent
                 latent_model_input = torch.cat([noisy_latents, mask, masked_latents], dim=1)
-
                 # Get the text embedding for conditioning
                 encoder_hidden_states = text_encoder(batch["input_ids"])[0]
 
@@ -755,7 +762,9 @@ def main():
                     loss = loss + args.prior_loss_weight * prior_loss
                 else:
                     loss = F.mse_loss(noise_pred.float(), target.float(), reduction="mean")
-
+                # TODO (odibua@): Update loss to include SSIM between final image and image with clothes. https://torchmetrics.readthedocs.io/en/stable/image/structural_similarity.html
+                # TODO (odibua@): Add softmax pixelwise loss to two images
+                # TODO (odibua@): Add Perception loss (MDF https://github.com/gfxdisp/mdf) or VGG (https://gist.github.com/alper111/8233cdb0414b4cb5853f2f730ab95a49)
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
                     params_to_clip = (

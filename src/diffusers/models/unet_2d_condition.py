@@ -120,7 +120,7 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
             An optional override for the dimension of the projected time embedding.
         time_embedding_act_fn (`str`, *optional*, default to `None`):
             Optional activation function to use on the time embeddings only one time before they as passed to the rest
-            of the unet. Choose from `silu`, `mish`, `gelu`, and `swish`.
+            of the def enable Choose from `silu`, `mish`, `gelu`, and `swish`.
         timestep_post_act (`str, *optional*, default to `None`):
             The second activation function to use in timestep embedding. Choose from `silu`, `mish` and `gelu`.
         time_cond_proj_dim (`int`, *optional*, default to `None`):
@@ -819,6 +819,7 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
             down_block_res_samples = new_down_block_res_samples
 
         # 4. mid
+
         if self.mid_block is not None:
             sample = self.mid_block(
                 sample,
@@ -870,3 +871,34 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
             return (sample,)
 
         return UNet2DConditionOutput(sample=sample)
+
+class UNet2DClothesConditionModel(UNet2DConditionModel):
+    def __init__(self, sample_size: int = None, unet: UNet2DConditionModel  = None, in_channels: int = 4, out_channels: int = 4, center_input_sample: bool = False, flip_sin_to_cos: bool = True, freq_shift: int = 0, down_block_types: Tuple[str] = ("CrossAttnDownBlock2D", "CrossAttnDownBlock2D", "CrossAttnDownBlock2D", "DownBlock2D"), mid_block_type: str = "UNetMidBlock2DCrossAttn", up_block_types: Tuple[str] = ("UpBlock2D", "CrossAttnUpBlock2D", "CrossAttnUpBlock2D", "CrossAttnUpBlock2D"), only_cross_attention: bool = False, block_out_channels: Tuple[int] = (320, 640, 1280, 1280), layers_per_block: int = 2, downsample_padding: int = 1, mid_block_scale_factor: float = 1, act_fn: str = "silu", norm_num_groups: int = 32, norm_eps: float = 0.00001, cross_attention_dim: int = 1280, encoder_hid_dim: int = None, encoder_hid_dim_type: str = None, attention_head_dim: int = 8, dual_cross_attention: bool = False, use_linear_projection: bool = False, class_embed_type: str = None, addition_embed_type: str  = None, num_class_embeds: int  = None, upcast_attention: bool = False, resnet_time_scale_shift: str = "default", resnet_skip_time_act: bool = False, resnet_out_scale_factor: int = 1, time_embedding_type: str = "positional", time_embedding_dim: int = None, time_embedding_act_fn: str = None, timestep_post_act: str = None, time_cond_proj_dim: int = None, conv_in_kernel: int = 3, conv_out_kernel: int = 3, projection_class_embeddings_input_dim: int = None, class_embeddings_concat: bool = False, mid_block_only_cross_attention: bool = None, cross_attention_norm: str = None, addition_embed_type_num_heads=64):
+        super().__init__(
+                          sample_size=unet.config.sample_size, in_channels = unet.config.in_channels, out_channels = unet.config.out_channels,
+                          center_input_sample = unet.config.center_input_sample, flip_sin_to_cos = unet.config.flip_sin_to_cos, freq_shift = unet.config.freq_shift, 
+                          down_block_types = unet.config.down_block_types, mid_block_type = unet.config.mid_block_type, up_block_types = unet.config.up_block_types, 
+                          only_cross_attention = unet.config.only_cross_attention, block_out_channels = unet.config.block_out_channels, layers_per_block = unet.config.layers_per_block, 
+                          downsample_padding = unet.config.downsample_padding, mid_block_scale_factor = unet.config.mid_block_scale_factor, act_fn = unet.config.act_fn, 
+                          norm_num_groups = unet.config.norm_num_groups, norm_eps = unet.config.norm_eps, cross_attention_dim = unet.config.cross_attention_dim, 
+                          encoder_hid_dim = unet.config.encoder_hid_dim, encoder_hid_dim_type = unet.config.encoder_hid_dim_type, attention_head_dim = unet.config.attention_head_dim, 
+                          dual_cross_attention = unet.config.dual_cross_attention, use_linear_projection = unet.config.use_linear_projection, class_embed_type = unet.config.class_embed_type, 
+                          addition_embed_type = unet.config.addition_embed_type, num_class_embeds = unet.config.num_class_embeds, upcast_attention = unet.config.upcast_attention, 
+                          resnet_time_scale_shift = unet.config.resnet_time_scale_shift, resnet_skip_time_act = unet.config.resnet_skip_time_act, resnet_out_scale_factor = unet.config.resnet_out_scale_factor,
+                          time_embedding_type = unet.config.time_embedding_type, time_embedding_dim = unet.config.time_embedding_dim, time_embedding_act_fn = unet.config.time_embedding_act_fn, 
+                          timestep_post_act = unet.config.timestep_post_act, time_cond_proj_dim = unet.config.time_cond_proj_dim , conv_in_kernel = unet.config.conv_in_kernel, 
+                          conv_out_kernel = unet.config.conv_out_kernel, projection_class_embeddings_input_dim = unet.config.projection_class_embeddings_input_dim, 
+                          class_embeddings_concat = unet.config.class_embeddings_concat, mid_block_only_cross_attention = unet.config.mid_block_only_cross_attention, 
+                          cross_attention_norm = unet.config.cross_attention_norm, addition_embed_type_num_heads = unet.config.addition_embed_type_num_heads
+                          )
+        self.conv_to_unet = nn.Conv2d(
+                13, unet.config.in_channels, kernel_size=1, dtype=torch.half
+            )
+        self.clothes_swish = nn.SiLU()
+
+    def forward(
+            self, sample: torch.FloatTensor, timestep: int, encoder_hidden_states: torch.Tensor, class_labels: Any = None, timestep_cond: Any = None, 
+            attention_mask: Any = None, cross_attention_kwargs: Dict[str, Any] = None, added_cond_kwargs: Dict[str, Any] = None, down_block_additional_residuals: Tuple = None, 
+            mid_block_additional_residual: Any = None, encoder_attention_mask: Any = None, return_dict: bool = True) -> UNet2DConditionOutput:
+        sample = self.clothes_swish(self.conv_to_unet(sample))
+        return super().forward(sample, timestep, encoder_hidden_states, class_labels, timestep_cond, attention_mask, cross_attention_kwargs, added_cond_kwargs, down_block_additional_residuals, mid_block_additional_residual, encoder_attention_mask, return_dict)
