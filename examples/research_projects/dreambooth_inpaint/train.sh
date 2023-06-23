@@ -4,7 +4,7 @@ export INSTANCE_MASKED_DIR="/content/drive/Othercomputers/ohi-mac/diffusers/test
 export INSTANCE_TARGET_DIR="/content/drive/Othercomputers/ohi-mac/diffusers/test_data/target"
 export INSTANCE_CLOTHES_DIR="/content/drive/Othercomputers/ohi-mac/diffusers/test_data/clothes"
 export INPAINT_MASK_DIR="/content/drive/Othercomputers/ohi-mac/diffusers/test_data/inpaint_mask"
-export OUTPUT_DIR="/content/drive/MyDrive/clothestest"
+export OUTPUT_DIR="/content/drive/MyDrive/clothestest-refactor"
 
 
 accelerate launch train_dreambooth_inpaint_clothes.py \
