@@ -44,6 +44,24 @@ def add_clothes_channel_to_unet(unet: nn.Module) -> nn.Module:
         unet.conv_in = conv_in
     return unet
 
+def get_clothes_unet(unet: nn.Module) -> nn.Module:
+    clothes_unet = UNet2DConditionModel(sample_size=unet.config.sample_size, in_channels = 13, out_channels = unet.config.out_channels,
+                          center_input_sample = unet.config.center_input_sample, flip_sin_to_cos = unet.config.flip_sin_to_cos, freq_shift = unet.config.freq_shift,
+                          down_block_types = unet.config.down_block_types, mid_block_type = unet.config.mid_block_type, up_block_types = unet.config.up_block_types,
+                          only_cross_attention = unet.config.only_cross_attention, block_out_channels = unet.config.block_out_channels, layers_per_block = unet.config.layers_per_block,
+                          downsample_padding = unet.config.downsample_padding, mid_block_scale_factor = unet.config.mid_block_scale_factor, act_fn = unet.config.act_fn,
+                          norm_num_groups = unet.config.norm_num_groups, norm_eps = unet.config.norm_eps, cross_attention_dim = unet.config.cross_attention_dim,
+                          encoder_hid_dim = unet.config.encoder_hid_dim, encoder_hid_dim_type = unet.config.encoder_hid_dim_type, attention_head_dim = unet.config.attention_head_dim,
+                          dual_cross_attention = unet.config.dual_cross_attention, use_linear_projection = unet.config.use_linear_projection, class_embed_type = unet.config.class_embed_type,
+                          addition_embed_type = unet.config.addition_embed_type, num_class_embeds = unet.config.num_class_embeds, upcast_attention = unet.config.upcast_attention,
+                          resnet_time_scale_shift = unet.config.resnet_time_scale_shift, resnet_skip_time_act = unet.config.resnet_skip_time_act, resnet_out_scale_factor = unet.config.resnet_out_scale_factor,
+                          time_embedding_type = unet.config.time_embedding_type, time_embedding_dim = unet.config.time_embedding_dim, time_embedding_act_fn = unet.config.time_embedding_act_fn,
+                          timestep_post_act = unet.config.timestep_post_act, time_cond_proj_dim = unet.config.time_cond_proj_dim , conv_in_kernel = unet.config.conv_in_kernel,
+                          conv_out_kernel = unet.config.conv_out_kernel, projection_class_embeddings_input_dim = unet.config.projection_class_embeddings_input_dim,
+                          class_embeddings_concat = unet.config.class_embeddings_concat, mid_block_only_cross_attention = unet.config.mid_block_only_cross_attention,
+                          cross_attention_norm = unet.config.cross_attention_norm, addition_embed_type_num_heads = unet.config.addition_embed_type_num_heads)
+    return clothes_unet
+
 def get_tokenizer(tokenizer_name: str = None, pretrained_model_name: str = None) -> CLIPTokenizer:
     assert (
             tokenizer_name is not None and pretrained_model_name is None
@@ -56,25 +74,21 @@ def get_tokenizer(tokenizer_name: str = None, pretrained_model_name: str = None)
         tokenizer = CLIPTokenizer.from_pretrained(pretrained_model_name, subfolder="tokenizer")
     return tokenizer
 
-def get_models(torch_dtype: torch.dtype, pretrained_name: str, ignore_list: List[str] = [], 
+def get_models(torch_dtype: torch.dtype, pretrained_name: str, get_list: List[str], checkpoint: str = None,
                                    clothes_version: str = 'v1') -> Dict[str, Union[CLIPTextModel, AutoencoderKL, UNet2DConditionModel, StableDiffusionInpaintClothesPipeline]]:
-    ignore_possibilites = ['text_encoder', 'vae', 'unet', 'pipeline']
-    if len(ignore_list) > 0:
-        sum_ignored = [ignore_elem in ignore_possibilites for ignore_elem in ignore_possibilites]
-        assert sum(sum_ignored) > 0, "Some of the elements in the ignore list are not possible. Current ignore list is {} and possibilities are {}".format(ignore_list, ignore_possibilites)
 
     models_dict = {}
-    if 'text_encoder' not in ignore_list:
+    if 'text_encoder' in get_list:
         models_dict.update({'text_encoder': CLIPTextModel.from_pretrained(pretrained_name, subfolder="text_encoder")})
     else:
         models_dict.update({'text_encoder': None})
     
-    if 'vae' not in ignore_list:
+    if 'vae' in get_list:
         models_dict.update({'vae': AutoencoderKL.from_pretrained(pretrained_name, subfolder="vae")})
     else: 
         models_dict.update({'vae': None})
 
-    if 'unet' not in ignore_list:
+    if 'unet' in get_list:
         if clothes_version == 'v1':
             unet = UNet2DConditionModel.from_pretrained(pretrained_name, subfolder="unet")
             unet = add_clothes_channel_to_unet(unet)
@@ -85,7 +99,7 @@ def get_models(torch_dtype: torch.dtype, pretrained_name: str, ignore_list: List
     else: 
         models_dict.update({'unet': None})
 
-    if 'pipeline' not in ignore_list:
+    if 'pipeline' in get_list:
         pipeline = StableDiffusionInpaintClothesPipeline.from_pretrained(
                 pretrained_name, torch_dtype=torch_dtype, safety_checker=None
             )
@@ -93,6 +107,16 @@ def get_models(torch_dtype: torch.dtype, pretrained_name: str, ignore_list: List
         models_dict.update({'pipeline': pipeline})
     else:
         models_dict.update({'pipeline': None})
+
+    if 'eval_clothes_v1' in get_list:
+        unet = UNet2DConditionModel.from_pretrained(pretrained_name, subfolder="unet")
+        clothes_unet = get_clothes_unet(unet)
+        checkpoint = torch.load(checkpoint)
+        clothes_unet.load_state_dict(checkpoint)
+        clothes_unet.eval()
+        models_dict.update({'eval_clothes_v1': clothes_unet})
+    else: 
+        models_dict.update({'eval_clothes_v1': None})
 
     return models_dict
 
@@ -122,14 +146,15 @@ def get_collate_function(tokenizer: CLIPTokenizer) -> Callable:
 
     def collate_fn(examples):
         input_ids = [example["instance_prompt_ids"] for example in examples]
-        target_pixel_values = [example["instance_targets"] for example in examples]
+        if 'instance_targets' in examples[0].keys():
+            target_pixel_values = [example["instance_targets"] for example in examples]
         clothes_pixel_values = [example["instance_clothes"] for example in examples]
         pixel_values = [example["instance_masked"] for example in examples]
 
         masks = []
         masked_images = []
         for example in examples:
-            pil_image = example["PIL_instance_targets"]
+            pil_image = example["PIL_instance_targets"] if "PIL_instance_targets" in example.keys() else example["PIL_instance_masked"]
             mask = example["PIL_instance_masks"]
             # prepare mask and masked image
             mask, masked_image = prepare_mask_and_masked_image(pil_image, mask)
@@ -143,13 +168,17 @@ def get_collate_function(tokenizer: CLIPTokenizer) -> Callable:
         clothes_pixel_values = torch.stack(clothes_pixel_values)
         clothes_pixel_values = clothes_pixel_values.to(memory_format=torch.contiguous_format).float()
 
-        target_pixel_values = torch.stack(target_pixel_values)
-        target_pixel_values = target_pixel_values.to(memory_format=torch.contiguous_format).float()
 
         input_ids = tokenizer.pad({"input_ids": input_ids}, padding=True, return_tensors="pt").input_ids
         masks = torch.stack(masks)
         masked_images = torch.stack(masked_images)
-        batch = {"input_ids": input_ids, "pixel_values": pixel_values, "target_pixel_values": target_pixel_values, "clothes_pixel_values": clothes_pixel_values, "masks": masks, "masked_images": masked_images}
+        if 'instance_targets' in example.keys():
+            target_pixel_values = torch.stack(target_pixel_values)
+            target_pixel_values = target_pixel_values.to(memory_format=torch.contiguous_format).float()
+            batch = {"input_ids": input_ids, "pixel_values": pixel_values, "target_pixel_values": target_pixel_values, "clothes_pixel_values": clothes_pixel_values, "masks": masks, "masked_images": masked_images}
+        else:
+            batch = {"input_ids": input_ids, "pixel_values": pixel_values, "clothes_pixel_values": clothes_pixel_values, "masks": masks, "masked_images": masked_images}
+
         return batch
     
     return collate_fn
@@ -257,9 +286,11 @@ def get_init_latents(
 
         latents = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
         latents = latents * vae.config.scaling_factor
-
-        target_latents = vae.encode(batch["target_pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
-        target_latents = target_latents * vae.config.scaling_factor
+        if "target_pixel_values" in batch.keys():
+            target_latents = vae.encode(batch["target_pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
+            target_latents = target_latents * vae.config.scaling_factor
+        else: 
+            target_latents = None
 
         clothes_latents = vae.encode(batch["clothes_pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
         clothes_latents = clothes_latents * vae.config.scaling_factor

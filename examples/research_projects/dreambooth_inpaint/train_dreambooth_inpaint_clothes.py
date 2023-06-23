@@ -524,7 +524,7 @@ def main():
 
     # 4) Load models and place ones that won't be trained on the device
     ###########################################################
-    models_dict = get_models(torch_dtype=weight_dtype, pretrained_name=args.pretrained_model_name_or_path, clothes_version=args.clothes_version)
+    models_dict = get_models(torch_dtype=weight_dtype, pretrained_name=args.pretrained_model_name_or_path, get_list=['text_encoder', 'vae', 'unet', 'pipeline'], clothes_version=args.clothes_version)
     text_encoder, vae, unet, pipeline = models_dict['text_encoder'], models_dict['vae'], models_dict['unet'], models_dict['pipeline']
 
     vae.requires_grad_(False)
@@ -590,7 +590,6 @@ def main():
 
     unet, optimizer, train_dataloader = prepare_models_with_accelerator(accelerator, [unet, optimizer, train_dataloader])
     ###########################################################
-    import gc
     # Scheduler and math around the number of training steps.
     num_train_epochs, num_update_steps_per_epoch  = get_training_params(train_dataloader=train_dataloader, gradient_accumulation_steps=args.gradient_accumulation_steps, 
                         max_train_steps=args.max_train_steps, num_train_epochs=args.num_train_epochs)
