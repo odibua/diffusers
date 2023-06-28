@@ -19,6 +19,7 @@ if is_torch_available():
     from .autoencoder_kl import AutoencoderKL
     from .controlnet import ControlNetModel
     from .dual_transformer_2d import DualTransformer2DModel
+    from .edit_latent import EditLatentSpaceModel
     from .modeling_utils import ModelMixin
     from .prior_transformer import PriorTransformer
     from .t5_film_transformer import T5FilmDecoder
@@ -27,6 +28,7 @@ if is_torch_available():
     from .unet_2d import UNet2DModel
     from .unet_2d_condition import UNet2DConditionModel
     from .unet_2d_condition import UNet2DClothesConditionModel
+    from .unet_2d_condition import UNet2DClothesModificationModel
     from .unet_3d_condition import UNet3DConditionModel
     from .vq_model import VQModel
 

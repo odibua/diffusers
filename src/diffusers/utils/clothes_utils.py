@@ -23,9 +23,10 @@ from tqdm.auto import tqdm
 
 from diffusers import (
     AutoencoderKL,
-    DDPMScheduler,
+    EditLatentSpaceModel,
     StableDiffusionInpaintClothesPipeline,
-    UNet2DConditionModel
+    UNet2DConditionModel,
+    UNet2DClothesConditionModel
 )
 from diffusers.utils import check_min_version
 from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_inpaint_clothes import _prepare_mask_and_masked_image
@@ -89,9 +90,23 @@ def get_models(torch_dtype: torch.dtype, pretrained_name: str, get_list: List[st
         models_dict.update({'vae': None})
 
     if 'unet' in get_list:
-        if clothes_version == 'v1':
+        if clothes_version  == 'v1':
             unet = UNet2DConditionModel.from_pretrained(pretrained_name, subfolder="unet")
             unet = add_clothes_channel_to_unet(unet)
+            models_dict.update({'unet': unet})
+        elif clothes_version == 'v2':
+            unet = UNet2DClothesConditionModel.from_pretrained(pretrained_name, 
+                                                                       subfolder="unet", 
+                                                                      low_cpu_mem_usage=False,
+                                                                      device_map=None
+                                                                      )
+            models_dict.update({'unet': unet})
+        elif clothes_version == 'v3':
+            unet = UNet2DConditionModel.from_pretrained(pretrained_name, 
+                                                                       subfolder="unet", 
+                                                                      low_cpu_mem_usage=False,
+                                                                      device_map=None
+                                                                      )
             models_dict.update({'unet': unet})
         else:
             NotImplementedError("Version {} for modeling clothes is not yet implemented".format(clothes_version))
@@ -117,6 +132,16 @@ def get_models(torch_dtype: torch.dtype, pretrained_name: str, get_list: List[st
         models_dict.update({'eval_clothes_v1': clothes_unet})
     else: 
         models_dict.update({'eval_clothes_v1': None})
+
+    if 'edit_latent' in get_list: 
+        if clothes_version == 'v3':
+            edit_latent = EditLatentSpaceModel()
+            models_dict.update({'edit_latent': edit_latent})
+            
+        else:
+            raise NotImplementedError("The EditLatent model is implemented for clothes verion 'v3'. User passed in {}".format(clothes_version))
+    else: 
+        models_dict.update({'edit_latent': None})
 
     return models_dict
 
@@ -256,10 +281,10 @@ def get_end_loss_functions_dict(device: str, ssim: bool = True, ssim_weight: flo
     return loss_dict
 
 def get_init_latents(
-        vae: AutoencoderKL, pipeline: StableDiffusionInpaintClothesPipeline, unet: Callable, batch: Dict[str, torch.tensor],
+        vae: AutoencoderKL, pipeline: StableDiffusionInpaintClothesPipeline, unet: Callable, batch: Dict[str, torch.tensor], clothes_version: str,
         image: torch.tensor, mask_image: torch.tensor, height: float, width: float, generator: Generator, 
         prompt: str, device: str, num_images_per_prompt: int, do_classifier_free_guidance: bool, strength: float, 
-        negative_prompt: str, lora_scale: Callable, prompt_embeds: torch.tensor, negative_prompt_embeds: torch.tensor, t: int, batch_size: int, weight_dtype: torch.dtype, 
+        negative_prompt: str, lora_scale: Callable, prompt_embeds: torch.tensor, negative_prompt_embeds: torch.tensor, t: int, batch_size: int, weight_dtype: torch.dtype
         ) -> Tuple[torch.tensor]:
 
         prompt_embeds = pipeline._encode_prompt(
@@ -270,7 +295,7 @@ def get_init_latents(
         negative_prompt,
         prompt_embeds=prompt_embeds,
         negative_prompt_embeds=negative_prompt_embeds,
-        lora_scale=lora_scale
+        lora_scale=lora_scale,
         )
         latent_timestep = t.repeat(batch_size * num_images_per_prompt)
         # create a boolean to check if the strength is set to 1. if so then initialise the latents with pure noise
@@ -311,7 +336,7 @@ def get_init_latents(
                         return_image_latents=return_image_latents,
                     )
 
-        latents, clothes_latents, _ = latents_outputs
+        latents, _, _ = latents_outputs
 
         mask, masked_image_latents = pipeline.prepare_mask_latents(
                             mask,

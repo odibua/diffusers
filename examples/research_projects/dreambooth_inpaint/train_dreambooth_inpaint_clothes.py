@@ -1,6 +1,7 @@
 import argparse
 from contextlib import nullcontext
 import itertools
+import gc 
 import os
 import random
 from pathlib import Path
@@ -149,7 +150,7 @@ def parse_args():
     parser.add_argument(
         "--num_inference_steps",
         type=int,
-        default=25,
+        default=20,
         help="Number of inference steps",
     )
     parser.add_argument(
@@ -524,19 +525,47 @@ def main():
 
     # 4) Load models and place ones that won't be trained on the device
     ###########################################################
-    models_dict = get_models(torch_dtype=weight_dtype, pretrained_name=args.pretrained_model_name_or_path, get_list=['text_encoder', 'vae', 'unet', 'pipeline'], clothes_version=args.clothes_version)
-    text_encoder, vae, unet, pipeline = models_dict['text_encoder'], models_dict['vae'], models_dict['unet'], models_dict['pipeline']
+    if args.clothes_version in ["v1", "v2"]:
+        models_dict = get_models(torch_dtype=weight_dtype, pretrained_name=args.pretrained_model_name_or_path, get_list=['text_encoder', 'vae', 'unet', 'pipeline'], clothes_version=args.clothes_version)
+        text_encoder, vae, unet, pipeline = models_dict['text_encoder'], models_dict['vae'], models_dict['unet'], models_dict['pipeline']
+    elif args.clothes_version == "v3":
+        models_dict = get_models(torch_dtype=weight_dtype, pretrained_name=args.pretrained_model_name_or_path, get_list=['text_encoder', 'unet', 'edit_latent', 'pipeline'], clothes_version=args.clothes_version)
+        text_encoder, unet, pipeline, edit_latent = models_dict['text_encoder'], models_dict['unet'], models_dict['pipeline'], models_dict['edit_latent']
+    elif args.clothes_version == "v4":
+        models_dict = get_models(torch_dtype=weight_dtype, pretrained_name=args.pretrained_model_name_or_path, get_list=['text_encoder', 'unet', 'pipeline'], clothes_version=args.clothes_version)
+        text_encoder, unet, pipeline = models_dict['text_encoder'], models_dict['unet'], models_dict['pipeline']
+    else: 
+        raise NotImplementedError("Get models not impelemented for clothes version {}".format(args.clothes_version))
+    
+    if args.clothes_version in ["v1", "v2", "v4"]:
+        vae.requires_grad_(False)
+        text_encoder.requires_grad_(False)
+    elif args.clothes_version == "v3":
+        pipeline.vae.requires_grad_(False)
+        pipeline.text_encoder.requires_grad_(False)
+        text_encoder.requires_grad_(False)
+        # unet.requires_grad_(False)
+        pipeline.unet.requires_grad_(False) 
 
-    vae.requires_grad_(False)
-    text_encoder.requires_grad_(False)
-
-    place_on_device(device=device, weight_dtype=weight_dtype, models=[vae, pipeline, pipeline.text_encoder])
+    else: 
+        raise NotImplementedError("Require grad setting to False not implemented for clothes version {}".format(args.clothes_version))
+    
+    if args.clothes_version in ["v1", "v2"]:
+        place_on_device(device=device, weight_dtype=weight_dtype, models=[vae, pipeline, pipeline.text_encoder])
+    elif args.clothes_version == "v3":
+        place_on_device(device=device, weight_dtype=weight_dtype, models=[unet, pipeline.vae, pipeline.text_encoder])
+        # place_on_device(device=device, weight_dtype=weight_dtype, models=[unet, vae, pipeline, pipeline.text_encoder])
+        # pipeline.to('cpu', weight_dtype)
+        # place_on_device(device=device, weight_dtype=weight_dtype, models=[unet, vae, pipeline.text_encoder])
+    else: 
+        raise NotImplementedError("Place on device not implemented for clothes version {}".format(args.clothes_version))
     ###########################################################
 
     # 5) Set parameters for gradient checking and initialize optimizer/params to optimize
     ###########################################################
     if args.gradient_checkpointing:
-        unet.enable_gradient_checkpointing()
+        # unet.enable_gradient_checkpointing()
+        edit_latent.enable_gradient_checkpointing()
 
     if args.scale_lr:
         args.learning_rate = (
@@ -557,8 +586,10 @@ def main():
         optimizer_class = torch.optim.AdamW
 
     # Set parameters to optimize
-    if args.clothes_version == 'v1':
+    if args.clothes_version in ['v1', 'v2']:
         params_to_optimize = itertools.chain(unet.parameters())
+    elif args.clothes_version == "v3":
+         params_to_optimize = itertools.chain(edit_latent.parameters())
     else:
         raise NotImplementedError("Optimization of version {} for modeling clothes is not yet implemented".format(args.clothes_version))
     
@@ -588,7 +619,13 @@ def main():
         train_dataset, batch_size=args.train_batch_size, shuffle=True, collate_fn=collate_fn
     )
 
-    unet, optimizer, train_dataloader = prepare_models_with_accelerator(accelerator, [unet, optimizer, train_dataloader])
+    if args.clothes_version in ["v1", "v2"]:
+        unet, optimizer, train_dataloader = prepare_models_with_accelerator(accelerator, [unet, optimizer, train_dataloader])
+    elif args.clothes_version == "v3": 
+        edit_latent, optimizer, train_dataloader = prepare_models_with_accelerator(accelerator, [edit_latent, optimizer, train_dataloader])
+    else: 
+        raise NotImplementedError("Preparation of device not impelemnted for clothes_version {}".format(args.clothes_version))
+    
     ###########################################################
     # Scheduler and math around the number of training steps.
     num_train_epochs, num_update_steps_per_epoch  = get_training_params(train_dataloader=train_dataloader, gradient_accumulation_steps=args.gradient_accumulation_steps, 
@@ -645,7 +682,7 @@ def main():
     num_images_per_prompt, timesteps, batch_size, strength, guidance_scale, generator, negative_prompt, negative_prompt_embeds, cross_attention_kwargs, do_classifier_free_guidance, height, width, text_encoder_lora_scale = initialize_pipeline_params(num_inference_steps=args.num_inference_steps, device=device, pipeline=pipeline, strength=1.0, unet=unet)
 
      # 8) Get loss functions for the noisy loop and the end of the loop
-    noise_loss_function_dict = get_noise_loss_functions_dict(device=device, mse=True, mse_weight = 1)
+    noise_loss_function_dict = get_noise_loss_functions_dict(device=device, mse=True, mse_weight = 1e-2)
     loss_function_dict = get_end_loss_functions_dict(device=device, ssim=True, ssim_weight=4, l1 = True, l1_weight = 0.5)
     prompt="a person with a shirt"
     ##########################################################################################
@@ -653,44 +690,60 @@ def main():
     for epoch in range(first_epoch, num_train_epochs):
         for step, batch in enumerate(train_dataloader):
             # 10) Set relevant model to train
-            if args.clothes_version == 'v1':
+            if args.clothes_version in ['v1', 'v2']:
                 unet.train()
                 pipeline.unet = unet
+            elif args.clothes_version == "v3":
+                edit_latent.train()
+                # pipeline.unet = unet
             else:
                 raise NotImplementedError("Training loop not implemented for clothes model version {}".format(args.clothes_version))
             image=batch["pixel_values"]
             mask_image=batch["masks"][0]
             
-            with accelerator.accumulate(unet) if args.clothes_version == "v1" else nullcontext() as gs:
+            with accelerator.accumulate(edit_latent) if args.clothes_version == "v3" else (accelerator.accumulate(unet) if args.clothes_version in ["v1", "v2"] else nullcontext()) as gs:
                 noise_loss = 0
                 noise_loss_init_dict = {loss_key: 0 for loss_key in noise_loss_function_dict.keys()}
                 logs = { "idx": None, "epoch": None, "timestep": None}
                 for i, t in enumerate(timesteps):
                     logs["idx"], logs["epoch"], logs["timestep"] = i, epoch, t
+                    print(i, t)
                     if i == 0:
                         # 12) Initialize latents
                         prompt_embeds = None 
                         clothes_latents, latents, mask, masked_image_latents, prompt_embeds, target_latents = get_init_latents(
-                            vae=vae, pipeline=pipeline, unet=unet, batch=batch, image=image, mask_image=mask_image, height=height, width=width, generator=generator, 
+                            vae=pipeline.vae, pipeline=pipeline, unet=unet, batch=batch, image=image, mask_image=mask_image, height=height, width=width, generator=generator, clothes_version=args.clothes_version, 
                             prompt=prompt, device=device, num_images_per_prompt=num_images_per_prompt, do_classifier_free_guidance=do_classifier_free_guidance, strength=strength, 
-                            negative_prompt=negative_prompt, lora_scale=text_encoder_lora_scale, prompt_embeds=prompt_embeds, negative_prompt_embeds=negative_prompt_embeds, t=t, batch_size=batch_size, weight_dtype=weight_dtype, 
+                            negative_prompt=negative_prompt, lora_scale=text_encoder_lora_scale, prompt_embeds=prompt_embeds, negative_prompt_embeds=negative_prompt_embeds, t=t, batch_size=batch_size, weight_dtype=weight_dtype
                             )
                         noise = randn_tensor(target_latents.shape, generator=generator, device=device, dtype=weight_dtype)
 
                     # 13) Predict noise from latents and predict previous noisy sample
-                    latent_model_input = torch.cat([clothes_latents, latents], dim=1)
-                    latent_model_input = torch.cat([latent_model_input] * 2) if do_classifier_free_guidance else latent_model_input
+                    
+                    if args.clothes_version in ["v1", "v2"]:
+                        latent_model_input = torch.cat([clothes_latents, latents], dim=1)
+                        latent_model_input = torch.cat([latent_model_input] * 2) if do_classifier_free_guidance else latent_model_input
 
-                    latent_model_input = pipeline.scheduler.scale_model_input(latent_model_input, t)
+                        latent_model_input = pipeline.scheduler.scale_model_input(latent_model_input, t)
 
-                    latent_model_input = torch.cat([latent_model_input, mask, masked_image_latents], dim=1)
+                        latent_model_input = torch.cat([latent_model_input, mask, masked_image_latents], dim=1)
+                    elif args.clothes_version == "v3":
+                        mod_clothes_latents = edit_latent(clothes_latents, t).to(dtype=weight_dtype)
+                        latent_model_input = latents + mod_clothes_latents
+                        latent_model_input = torch.cat([latent_model_input] * 2) if do_classifier_free_guidance else latent_model_input
+
+                        latent_model_input = pipeline.scheduler.scale_model_input(latent_model_input, t)
+
+                        latent_model_input = torch.cat([latent_model_input, mask, masked_image_latents], dim=1)
+                    else:
+                        raise NotImplementedError("Training loop not implemented for clothes model version {}".format(args.clothes_version))
+
                     noise_pred = unet(latent_model_input,
                             t,
                             encoder_hidden_states=prompt_embeds,
                             cross_attention_kwargs=cross_attention_kwargs,
                             return_dict=False,
                         )[0]
-
                     kwargs = {'eta': 0, 'generator': None}
                     if do_classifier_free_guidance:
                         noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
@@ -704,16 +757,24 @@ def main():
                         loss_weight, loss_func = noise_loss_function_dict[loss_key]
                         noise_loss_init_dict[loss_key] = noise_loss_init_dict[loss_key] + loss_weight * loss_func(latents.float(), _target_latents.float())
 
-                logs.update({loss_key: noise_loss_init_dict[loss_key] for loss_key in noise_loss_init_dict.keys()})
+                    mod_clothes_latents = edit_latent(clothes_latents, t).to(dtype=weight_dtype)
+                    latents = latents + mod_clothes_latents
 
+                logs.update({loss_key: noise_loss_init_dict[loss_key] for loss_key in noise_loss_init_dict.keys()})
                 # 15) Average noisy loss
                 for loss_key in noise_loss_function_dict.keys():
                     noise_loss = noise_loss + noise_loss_init_dict[loss_key]
                 noise_loss = noise_loss / len(timesteps)
                 logs.update({'noise_loss': noise_loss})
 
-                _image =  vae.decode(latents.to(weight_dtype) / vae.config.scaling_factor, return_dict=False)[0]
-                _target = vae.decode(target_latents.to(weight_dtype) / vae.config.scaling_factor, return_dict=False)[0]
+                if args.clothes_version in ["v1", "v2"]:
+                    _image =  vae.decode(latents.to(weight_dtype) / vae.config.scaling_factor, return_dict=False)[0]
+                    _target = vae.decode(target_latents.to(weight_dtype) / vae.config.scaling_factor, return_dict=False)[0]
+                elif args.clothes_version == "v3":
+                    _image =  pipeline.vae.decode(latents.to(weight_dtype) / pipeline.vae.config.scaling_factor, return_dict=False)[0]
+                    _target = pipeline.vae.decode(target_latents.to(weight_dtype) / pipeline.vae.config.scaling_factor, return_dict=False)[0]
+                else:
+                    raise NotImplementedError("Decoding not implemented for version {}".format(args.clothes_version))
                 
 
                 # 16) Calculate loss
@@ -727,11 +788,18 @@ def main():
                 # 16) Calculate backward loss
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
-                    params_to_clip = (
-                        itertools.chain(unet.parameters(), text_encoder.parameters())
-                        if args.train_text_encoder
-                        else unet.parameters()
-                    )
+                    if args.clothes_version in ['v1', 'v2']:
+                        params_to_clip = (
+                            itertools.chain(unet.parameters(), text_encoder.parameters())
+                            if args.train_text_encoder
+                            else unet.parameters()
+                        )
+                    elif args.clothes_version == 'v3': 
+                        params_to_clip = (
+                            itertools.chain(edit_latent.parameters())
+                        )
+                    else: 
+                        raise NotImplementedError("Parameters to clip not implemented for clothes version {}".format(args.clothes_version))
                     accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
                 optimizer.step()
                 optimizer.zero_grad()

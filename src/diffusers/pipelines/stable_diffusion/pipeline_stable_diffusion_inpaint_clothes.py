@@ -633,6 +633,7 @@ class StableDiffusionInpaintClothesPipeline(DiffusionPipeline, TextualInversionL
         is_strength_max=True,
         return_noise=False,
         return_image_latents=False,
+        vae: torch.nn.Module = None
     ):
         shape = (batch_size, num_channels_latents, height // self.vae_scale_factor, width // self.vae_scale_factor)
         if isinstance(generator, list) and len(generator) != batch_size:
@@ -649,7 +650,7 @@ class StableDiffusionInpaintClothesPipeline(DiffusionPipeline, TextualInversionL
 
         if return_image_latents or (latents is None and not is_strength_max):
             image = image.to(device=device, dtype=dtype)
-            image_latents = self._encode_vae_image(image=image, generator=generator)
+            image_latents = self._encode_vae_image(image=image, generator=generator, vae=vae)
 
         if latents is None:
             noise = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
@@ -663,6 +664,11 @@ class StableDiffusionInpaintClothesPipeline(DiffusionPipeline, TextualInversionL
             clothes_noise = noise
             clothes_latents = self.scheduler.add_noise(clothes_latents, clothes_noise, timestep) * self.scheduler.init_noise_sigma
 
+            # noise = latents.to(device)
+            # latents = noise * self.scheduler.init_noise_sigma
+            # clothes_noise = clothes_latents.to(device)
+            # clothes_latents = clothes_noise * self.scheduler.init_noise_sigma
+
         outputs = (latents, clothes_latents)
 
         if return_noise:
@@ -673,7 +679,8 @@ class StableDiffusionInpaintClothesPipeline(DiffusionPipeline, TextualInversionL
 
         return outputs
 
-    def _encode_vae_image(self, image: torch.Tensor, generator: torch.Generator):
+    def _encode_vae_image(self, image: torch.Tensor, generator: torch.Generator, vae: torch.nn.Module = None):
+        self.vae = self.vae if vae is None else vae
         if isinstance(generator, list):
             image_latents = [
                 self.vae.encode(image[i : i + 1]).latent_dist.sample(generator=generator[i])
@@ -688,7 +695,7 @@ class StableDiffusionInpaintClothesPipeline(DiffusionPipeline, TextualInversionL
         return image_latents
 
     def prepare_mask_latents(
-        self, mask, masked_image, batch_size, height, width, dtype, device, generator, do_classifier_free_guidance
+        self, mask, masked_image, batch_size, height, width, dtype, device, generator, do_classifier_free_guidance, vae: torch.nn.Module = None
     ):
         # resize the mask to latents shape as we concatenate the mask to the latents
         # we do that before converting to dtype to avoid breaking in case we're using cpu_offload
@@ -699,7 +706,7 @@ class StableDiffusionInpaintClothesPipeline(DiffusionPipeline, TextualInversionL
         mask = mask.to(device=device, dtype=dtype)
 
         masked_image = masked_image.to(device=device, dtype=dtype)
-        masked_image_latents = self._encode_vae_image(masked_image, generator=generator)
+        masked_image_latents = self._encode_vae_image(masked_image, generator=generator, vae=vae)
 
         # duplicate mask and masked_image_latents for each generation per prompt, using mps friendly method
         if mask.shape[0] < batch_size:

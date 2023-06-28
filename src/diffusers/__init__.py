@@ -37,6 +37,7 @@ else:
     from .models import (
         AutoencoderKL,
         ControlNetModel,
+        EditLatentSpaceModel,
         ModelMixin,
         PriorTransformer,
         T5FilmDecoder,
@@ -44,6 +45,7 @@ else:
         UNet1DModel,
         UNet2DConditionModel,
         UNet2DClothesConditionModel,
+        UNet2DClothesModificationModel,
         UNet2DModel,
         UNet3DConditionModel,
         VQModel,
