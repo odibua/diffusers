@@ -589,6 +589,8 @@ def main():
     if args.clothes_version in ['v1', 'v2']:
         params_to_optimize = itertools.chain(unet.parameters())
     elif args.clothes_version == "v3":
+         import ipdb
+         ipdb.set_trace()
          params_to_optimize = itertools.chain(edit_latent.parameters())
     else:
         raise NotImplementedError("Optimization of version {} for modeling clothes is not yet implemented".format(args.clothes_version))
@@ -701,7 +703,7 @@ def main():
             image=batch["pixel_values"]
             mask_image=batch["masks"][0]
             
-            with accelerator.accumulate(edit_latent) if args.clothes_version == "v3" else (accelerator.accumulate(unet) if args.clothes_version in ["v1", "v2"] else nullcontext()) as gs:
+            with accelerator.accumulate(edit_latent): # if args.clothes_version == "v3" else (accelerator.accumulate(unet) if args.clothes_version in ["v1", "v2"] else nullcontext()) as gs:
                 noise_loss = 0
                 noise_loss_init_dict = {loss_key: 0 for loss_key in noise_loss_function_dict.keys()}
                 logs = { "idx": None, "epoch": None, "timestep": None}
