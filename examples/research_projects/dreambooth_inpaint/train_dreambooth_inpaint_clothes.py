@@ -150,7 +150,7 @@ def parse_args():
     parser.add_argument(
         "--num_inference_steps",
         type=int,
-        default=20,
+        default=25,
         help="Number of inference steps",
     )
     parser.add_argument(
@@ -564,8 +564,12 @@ def main():
     # 5) Set parameters for gradient checking and initialize optimizer/params to optimize
     ###########################################################
     if args.gradient_checkpointing:
-        # unet.enable_gradient_checkpointing()
-        edit_latent.enable_gradient_checkpointing()
+        if args.clothes_version in ["v1", "v2"]:
+            unet.enable_gradient_checkpointing()
+        elif args.clothes_version == "v3":
+            edit_latent.enable_gradient_checkpointing()
+        else: 
+            raise NotImplementedError("Gradient checkpointing not implemented for clothes version {}".format(args.clothes_version))
 
     if args.scale_lr:
         args.learning_rate = (
@@ -684,7 +688,7 @@ def main():
     num_images_per_prompt, timesteps, batch_size, strength, guidance_scale, generator, negative_prompt, negative_prompt_embeds, cross_attention_kwargs, do_classifier_free_guidance, height, width, text_encoder_lora_scale = initialize_pipeline_params(num_inference_steps=args.num_inference_steps, device=device, pipeline=pipeline, strength=1.0, unet=unet)
 
      # 8) Get loss functions for the noisy loop and the end of the loop
-    noise_loss_function_dict = get_noise_loss_functions_dict(device=device, mse=True, mse_weight = 1e-2)
+    noise_loss_function_dict = get_noise_loss_functions_dict(device=device, mse=True, mse_weight = 1)
     loss_function_dict = get_end_loss_functions_dict(device=device, ssim=True, ssim_weight=4, l1 = True, l1_weight = 0.5)
     prompt="a person with a shirt"
     ##########################################################################################
@@ -703,7 +707,7 @@ def main():
             image=batch["pixel_values"]
             mask_image=batch["masks"][0]
             
-            with accelerator.accumulate(edit_latent): # if args.clothes_version == "v3" else (accelerator.accumulate(unet) if args.clothes_version in ["v1", "v2"] else nullcontext()) as gs:
+            with accelerator.accumulate(edit_latent) if args.clothes_version == "v3" else accelerator.accumulate(unet) as gs:
                 noise_loss = 0
                 noise_loss_init_dict = {loss_key: 0 for loss_key in noise_loss_function_dict.keys()}
                 logs = { "idx": None, "epoch": None, "timestep": None}
@@ -759,8 +763,8 @@ def main():
                         loss_weight, loss_func = noise_loss_function_dict[loss_key]
                         noise_loss_init_dict[loss_key] = noise_loss_init_dict[loss_key] + loss_weight * loss_func(latents.float(), _target_latents.float())
 
-                    mod_clothes_latents = edit_latent(clothes_latents, t).to(dtype=weight_dtype)
-                    latents = latents + mod_clothes_latents
+                    # mod_clothes_latents = edit_latent(clothes_latents, t).to(dtype=weight_dtype)
+                    # latents = latents + mod_clothes_latents
 
                 logs.update({loss_key: noise_loss_init_dict[loss_key] for loss_key in noise_loss_init_dict.keys()})
                 # 15) Average noisy loss
