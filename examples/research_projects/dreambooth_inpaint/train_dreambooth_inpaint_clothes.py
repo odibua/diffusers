@@ -426,6 +426,7 @@ class ClothesDataset(Dataset):
             ]
         )
 
+
     def __len__(self):
         return self._length
 
@@ -758,8 +759,8 @@ def main():
                         gen_save_path = os.path.join(args.output_dir,f"get-{epoch}-{step}-{i}-{global_step}.png")
                         if global_step % args.checkpointing_steps == 0:
                             accelerator.save_state(save_path)
-                        inv_transform(_target[0]).save(target_save_path)
-                        inv_transform(_image[0]).save(gen_save_path)
+                        inv_transform(_target[0] * 0.5 + 0.5).save(target_save_path)
+                        inv_transform(_image[0] * 0.5 + 0.5).save(gen_save_path)
                         logger.info(f"Saved state to {save_path}")
         accelerator.wait_for_everyone()
 
