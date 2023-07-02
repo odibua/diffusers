@@ -474,8 +474,6 @@ class ClothesDataset(Dataset):
                 instance_clothes_masks = instance_clothes_masks.convert("L")
             instance_clothes_masks = self.image_transforms_resize_and_crop(instance_clothes_masks)
             example["instance_clothes_masks"] = self.image_transforms(instance_clothes_masks)
-            import ipdb
-            ipdb.set_trace()
 
         if instance_target_image is not None:
             if not instance_target_image.mode == "RGB":
@@ -702,8 +700,8 @@ def main():
     num_images_per_prompt, timesteps, batch_size, strength, guidance_scale, generator, negative_prompt, negative_prompt_embeds, cross_attention_kwargs, do_classifier_free_guidance, height, width, text_encoder_lora_scale = initialize_pipeline_params(num_inference_steps=args.num_inference_steps, device=device, pipeline=pipeline, strength=1.0, unet=unet)
 
      # 8) Get loss functions for the noisy loop and the end of the loop
-    noise_loss_function_dict = get_noise_loss_functions_dict(device=device, mse=True, mse_weight = 1)
-    loss_function_dict = get_end_loss_functions_dict(device=device, ssim=True, ssim_weight=4, l1 = True, l1_weight = 0.5)
+    noise_loss_function_dict = get_noise_loss_functions_dict(device=device, mse=True, mse_weight = 0)
+    loss_function_dict = get_end_loss_functions_dict(device=device, ssim=True, ssim_weight=1, l1 = True, l1_weight = 1)
     prompt="a person with a shirt"
     ##########################################################################################
     # 9) Run training loop
@@ -719,8 +717,7 @@ def main():
             if args.clothes_version in ['v1', 'v2']:
                 image=batch["pixel_values"]
                 mask_image=batch["masks"][0]
-            import ipdb
-            ipdb.set_trace()
+
             with accelerator.accumulate(unet) if args.clothes_version in ["v1", 'v2'] else nullcontext() as gs:
                 noise_loss = 0
                 noise_loss_init_dict = {loss_key: 0 for loss_key in noise_loss_function_dict.keys()}
@@ -741,7 +738,7 @@ def main():
                             vae=vae, pipeline=pipeline, unet=unet, batch=batch, image=image, mask_image=mask_image, height=height, width=width, generator=generator, 
                             prompt=prompt, device=device, num_images_per_prompt=num_images_per_prompt, do_classifier_free_guidance=do_classifier_free_guidance, strength=strength, 
                             negative_prompt=negative_prompt, lora_scale=text_encoder_lora_scale, prompt_embeds=prompt_embeds, negative_prompt_embeds=negative_prompt_embeds, t=t, batch_size=batch_size, weight_dtype=weight_dtype, 
-                            clothes_version='v2')
+                            clothes_version='v2', noise_close_latents=False)
                         else:
                             raise NotImplementedError("Get initial latents not implemented for clothes version {}".format(args.clothes_version))
                         noise = randn_tensor(target_latents.shape, generator=generator, device=device, dtype=weight_dtype)
@@ -763,18 +760,25 @@ def main():
                     elif args.clothes_version == 'v2':
                         latent_model_input = torch.cat([latents], dim=1)
                         latent_model_input = torch.cat([latent_model_input] * 2) if do_classifier_free_guidance else latent_model_input
-                        clothes_latent_model_input = torch.cat([clothes_latents], dim=1)
-                        clothes_latent_model_input = torch.cat([clothes_latent_model_input] * 2) if do_classifier_free_guidance else clothes_latent_model_input
+                        # clothes_latent_model_input = torch.cat([clothes_latents], dim=1)
+                        # clothes_latent_model_input = torch.cat([clothes_latent_model_input] * 2) if do_classifier_free_guidance else clothes_latent_model_input
 
                         latent_model_input = pipeline.scheduler.scale_model_input(latent_model_input, t)
-                        clothes_latent_model_input = pipeline.scheduler.scale_model_input(clothes_latent_model_input, t)
+                        # clothes_latent_model_input = pipeline.scheduler.scale_model_input(clothes_latent_model_input, t)
 
                         latent_model_input = torch.cat([latent_model_input, mask, masked_image_latents], dim=1)
-                        clothes_latent_model_input = torch.cat([clothes_latent_model_input, clothes_mask, clothes_masked_image_latents], dim=1)
+                        # clothes_latent_model_input = torch.cat([clothes_latent_model_input, clothes_mask, clothes_masked_image_latents], dim=1)
 
+                        # noise_pred = unet(latent_model_input,
+                        #         t,
+                        #         clothes_sample=clothes_latent_model_input,
+                        #         encoder_hidden_states=prompt_embeds,
+                        #         cross_attention_kwargs=cross_attention_kwargs,
+                        #         return_dict=False,
+                        #     )[0]
                         noise_pred = unet(latent_model_input,
                                 t,
-                                clothes_sample=clothes_latent_model_input,
+                                clothes_latent=torch.cat([clothes_latents, clothes_latents]),
                                 encoder_hidden_states=prompt_embeds,
                                 cross_attention_kwargs=cross_attention_kwargs,
                                 return_dict=False,
@@ -788,7 +792,8 @@ def main():
                     if args.clothes_version == 'v1':
                         clothes_latents = pipeline.scheduler.step(noise_pred, t, clothes_latents, **kwargs, return_dict=False)[0]
                     elif args.clothes_version == 'v2':
-                        clothes_latents = pipeline.scheduler.step(noise_pred, t, clothes_latents, **kwargs, return_dict=False)[0]
+                        pass
+                        # clothes_latents = pipeline.scheduler.step(noise_pred, t, clothes_latents, **kwargs, return_dict=False)[0]
                     else:
                         raise NotImplementedError("Clothes Latent processing not implemented for clothes model version {}".format(args.clothes_version))
                     _target_latents = pipeline.scheduler.add_noise(target_latents, noise, max((t-1, 0))) * pipeline.scheduler.init_noise_sigma
@@ -817,6 +822,7 @@ def main():
                     _loss = loss_weight * loss_func(latents.float(), _target_latents.float())
                     loss = loss + _loss
                     logs.update({loss_key: _loss})
+                logs.update({'loss': loss})
 
                 # 16) Calculate backward loss
                 accelerator.backward(loss)

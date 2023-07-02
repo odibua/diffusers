@@ -95,7 +95,12 @@ def get_models(torch_dtype: torch.dtype, pretrained_name: str, get_list: List[st
             unet = add_clothes_channel_to_unet(unet)
             models_dict.update({'unet': unet})
         elif clothes_version == 'v2':
-            unet = UNet2DConditionClotheLatentsnModel.from_pretrained(pretrained_name, subfolder="unet")
+            unet = UNet2DConditionClotheLatentsnModel.from_pretrained(
+                                                                        pretrained_name, 
+                                                                        subfolder="unet", 
+                                                                        low_cpu_mem_usage=False,
+                                                                        device_map=None
+                                                                    )
             models_dict.update({'unet': unet})
         else:
             NotImplementedError("Version {} for modeling clothes is not yet implemented".format(clothes_version))
@@ -278,7 +283,7 @@ def get_init_latents(
         image: torch.tensor, mask_image: torch.tensor, height: float, width: float, generator: Generator, 
         prompt: str, device: str, num_images_per_prompt: int, do_classifier_free_guidance: bool, strength: float, 
         negative_prompt: str, lora_scale: Callable, prompt_embeds: torch.tensor, negative_prompt_embeds: torch.tensor, t: int, batch_size: int, weight_dtype: torch.dtype, 
-       clothes_version: str = 'v1') -> Tuple[torch.tensor]:
+       clothes_version: str = 'v1', noise_close_latents: bool = True) -> Tuple[torch.tensor]:
 
         prompt_embeds = pipeline._encode_prompt(
         prompt,
@@ -293,8 +298,7 @@ def get_init_latents(
         latent_timestep = t.repeat(batch_size * num_images_per_prompt)
         # create a boolean to check if the strength is set to 1. if so then initialise the latents with pure noise
         is_strength_max = strength == 1.0
-        import ipdb
-        ipdb.set_trace()
+
         mask, masked_image, init_image = _prepare_mask_and_masked_image(
                         image, mask_image, height, width, return_image=True
                     )
@@ -332,26 +336,26 @@ def get_init_latents(
                         return_noise=True,
                         return_image_latents=return_image_latents,
                     )
-        
-        clothes_latents_outputs = pipeline.prepare_latents(
-                batch_size * num_images_per_prompt,
-                num_channels_latents,
-                height,
-                width,
-                prompt_embeds.dtype,
-                device,
-                generator,
-                latents=clothes_latents,
-                image=clothes_init_image,
-                timestep=latent_timestep,
-                is_strength_max=is_strength_max,
-                return_noise=True,
-                return_image_latents=return_image_latents,
-            )
-        import ipdb
-        ipdb.set_trace()
         latents, _ = latents_outputs
-        clothes_latents, _ = clothes_latents_outputs
+
+        if noise_close_latents:
+            clothes_latents_outputs = pipeline.prepare_latents(
+                    batch_size * num_images_per_prompt,
+                    num_channels_latents,
+                    height,
+                    width,
+                    prompt_embeds.dtype,
+                    device,
+                    generator,
+                    latents=clothes_latents,
+                    image=clothes_init_image,
+                    timestep=latent_timestep,
+                    is_strength_max=is_strength_max,
+                    return_noise=True,
+                    return_image_latents=return_image_latents,
+                )
+
+            clothes_latents, _ = clothes_latents_outputs
 
         mask, masked_image_latents = pipeline.prepare_mask_latents(
                             mask,

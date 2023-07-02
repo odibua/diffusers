@@ -218,6 +218,8 @@ class UNet2DConditionClotheLatentsnModel(ModelMixin, ConfigMixin, UNet2DConditio
 
         # input
         conv_in_padding = (conv_in_kernel - 1) // 2
+        self.clothes_to_encoder_1 = nn.Linear(128, 77)
+        self.clothes_to_encoder_2 = nn.Linear(128,768)
         self.conv_in = nn.Conv2d(
             in_channels, block_out_channels[0], kernel_size=conv_in_kernel, padding=conv_in_padding
         )
@@ -629,6 +631,8 @@ class UNet2DConditionClotheLatentsnModel(ModelMixin, ConfigMixin, UNet2DConditio
         timestep: Union[torch.Tensor, float, int],
         encoder_hidden_states: torch.Tensor,
         clothes_sample: torch.FloatTensor = None,
+        clothes_latent: torch.FloatTensor = None,
+        alpha: float = 0.5,
         class_labels: Optional[torch.Tensor] = None,
         timestep_cond: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
@@ -670,7 +674,12 @@ class UNet2DConditionClotheLatentsnModel(ModelMixin, ConfigMixin, UNet2DConditio
         # on the fly if necessary.
         default_overall_up_factor = 2**self.num_upsamplers
 
-        model_samples = [sample, clothes_sample] if clothes_sample is None else [sample]
+        model_samples = [sample, clothes_sample] if clothes_sample is not None else [sample]
+
+        clothes_latent = clothes_latent.reshape((2, 128, 128))
+        clothes_latent = torch.permute(self.clothes_to_encoder_1(clothes_latent), (0, 2, 1))
+        encoder_hidden_states = self.clothes_to_encoder_2(clothes_latent)
+
         # upsample size should be forwarded when sample is not a multiple of `default_overall_up_factor`
         forward_upsample_size = False
         upsample_size = None
@@ -813,6 +822,7 @@ class UNet2DConditionClotheLatentsnModel(ModelMixin, ConfigMixin, UNet2DConditio
                 down_block_res_samples = new_down_block_res_samples
 
             # 4. mid
+            # down_block_res_samples_list.append(down_block_res_samples)
             if self.mid_block is not None:
                 sample = self.mid_block(
                     sample,
@@ -826,43 +836,52 @@ class UNet2DConditionClotheLatentsnModel(ModelMixin, ConfigMixin, UNet2DConditio
             if mid_block_additional_residual is not None:
                 sample = sample + mid_block_additional_residual
             
-            model_samples[idx] = sample 
+
+            # assert len(model_samples) == len(down_block_res_samples_list), "The model samples and down_block_res_samples_list sizes must both be two. Model samples is {} and down_block_res_samples_list is {}".format(len(model_samples), len(down_block_res_samples_list))
+            # sample = alpha * model_samples[0] + (1 - alpha) * model_samples[1] if len(model_samples) == 2 else model_samples[0]
+            # sample = model_samples[0] + model_samples[1] if len(model_samples) == 2 else model_samples[0]
+            # if len(model_samples) == 2:
+            #     down_block_res_samples = (alpha * down_block_res_samples_list[0][0] + (1 - alpha) * down_block_res_samples_list[1][0],)
+            #     for idx in range(1, len(down_block_res_samples_list[0])):
+            #         down_block_res_samples = down_block_res_samples + (alpha * down_block_res_samples_list[0][idx] + (1 - alpha) * down_block_res_samples_list[1][idx],)
+            #     # down_block_res_samples = (down_block_res_samples_list[0][0] + down_block_res_samples_list[1][0],) if len(model_samples) == 2 else model_samples[0]
+            #         # 5. up
+
+            for i, upsample_block in enumerate(self.up_blocks):
+                is_final_block = i == len(self.up_blocks) - 1
+
+                res_samples = down_block_res_samples[-len(upsample_block.resnets) :]
+                down_block_res_samples = down_block_res_samples[: -len(upsample_block.resnets)]
+
+                # if we have not reached the final block and need to forward the
+                # upsample size, we do it here
+                if not is_final_block and forward_upsample_size:
+                    upsample_size = down_block_res_samples[-1].shape[2:]
+
+                if hasattr(upsample_block, "has_cross_attention") and upsample_block.has_cross_attention:
+                    sample = upsample_block(
+                        hidden_states=sample,
+                        temb=emb,
+                        res_hidden_states_tuple=res_samples,
+                        encoder_hidden_states=encoder_hidden_states,
+                        cross_attention_kwargs=cross_attention_kwargs,
+                        upsample_size=upsample_size,
+                        attention_mask=attention_mask,
+                        encoder_attention_mask=encoder_attention_mask,
+                    )
+                else:
+                    sample = upsample_block(
+                        hidden_states=sample, temb=emb, res_hidden_states_tuple=res_samples, upsample_size=upsample_size
+                    )
+
+            # 6. post-process
+            if self.conv_norm_out:
+                sample = self.conv_norm_out(sample)
+                sample = self.conv_act(sample)
+            sample = self.conv_out(sample)
+            model_samples[idx] = sample
 
         sample = model_samples[0] + model_samples[1] if len(model_samples) == 2 else model_samples[0]
-        # 5. up
-        for i, upsample_block in enumerate(self.up_blocks):
-            is_final_block = i == len(self.up_blocks) - 1
-
-            res_samples = down_block_res_samples[-len(upsample_block.resnets) :]
-            down_block_res_samples = down_block_res_samples[: -len(upsample_block.resnets)]
-
-            # if we have not reached the final block and need to forward the
-            # upsample size, we do it here
-            if not is_final_block and forward_upsample_size:
-                upsample_size = down_block_res_samples[-1].shape[2:]
-
-            if hasattr(upsample_block, "has_cross_attention") and upsample_block.has_cross_attention:
-                sample = upsample_block(
-                    hidden_states=sample,
-                    temb=emb,
-                    res_hidden_states_tuple=res_samples,
-                    encoder_hidden_states=encoder_hidden_states,
-                    cross_attention_kwargs=cross_attention_kwargs,
-                    upsample_size=upsample_size,
-                    attention_mask=attention_mask,
-                    encoder_attention_mask=encoder_attention_mask,
-                )
-            else:
-                sample = upsample_block(
-                    hidden_states=sample, temb=emb, res_hidden_states_tuple=res_samples, upsample_size=upsample_size
-                )
-
-        # 6. post-process
-        if self.conv_norm_out:
-            sample = self.conv_norm_out(sample)
-            sample = self.conv_act(sample)
-        sample = self.conv_out(sample)
-
         if not return_dict:
             return (sample,)
 
