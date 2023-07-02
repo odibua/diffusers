@@ -134,6 +134,13 @@ def parse_args():
         help="A folder containing the training data of mask that mask out the part of the body to be fit",
     )
     parser.add_argument(
+        "--instance_clothes_masks_dir",
+        type=str,
+        default=None,
+        required=True,
+        help="A folder containing the training data of a mask of the clothes",
+    )
+    parser.add_argument(
         "--class_data_dir",
         type=str,
         default=None,
@@ -357,17 +364,21 @@ class ClothesDataset(Dataset):
         instance_target_root: str = None,
         instance_clothes_root: str = None,
         instance_mask_root: str = None,
+        instance_clothes_mask_root: str = None,
         instance_prompt: str = None,
         tokenizer: str = None,
         instance_masked_images_paths: List[str] = None,
         instance_clothes_images_paths: List[str] = None,
         instance_masks_images_paths: List[str] = None,
-        size=512,
-        center_crop=False,
+        instnace_clothes_masks_images_paths: List[str] = None,
+        size: int = 512,
+        center_crop: bool = False,
+        clothes_version: str = 'v1'
     ):
         self.size = size
         self.center_crop = center_crop
         self.tokenizer = tokenizer
+        self.clothes_version = clothes_version
         if instance_masked_images_paths is None: 
             self.instance_masked_root = Path(instance_masked_root)
             if not self.instance_masked_root.exists():
@@ -384,21 +395,33 @@ class ClothesDataset(Dataset):
             self.instance_mask_root = Path(instance_mask_root)
             if not self.instance_mask_root.exists():
                 raise ValueError("Instance mask root doesn't exists.")
+            
+            if clothes_version == 'v2':
+                self.instance_clothes_mask_root = Path(instance_clothes_mask_root)
+                if not self.instance_clothes_mask_root.exists():
+                    raise ValueError("Instance clothes mask root doesn't exists.")
 
             self.instance_target_images_path = list(Path(instance_target_root).iterdir()) * 500
             instance_clothes_images_paths = [Path(instance_clothes_root) / target_image_path.name for target_image_path in self.instance_target_images_path] 
             instance_masks_images_paths = [Path(instance_mask_root) / target_image_path.name for target_image_path in self.instance_target_images_path] 
             instance_masked_images_paths = [Path(instance_masked_root) / target_image_path.name for target_image_path in self.instance_target_images_path] 
+            if clothes_version == 'v2':
+                instance_clothes_masks_images_paths = [Path(instance_clothes_mask_root) / target_image_path.name for target_image_path in self.instance_target_images_path] 
         else:
             self.instance_target_images_path = None
 
         self.instance_masked_images_path = instance_masked_images_paths  
         self.instance_clothes_images_path = instance_clothes_images_paths
         self.instance_masks_path = instance_masks_images_paths
+        if clothes_version == 'v2':
+            self.instance_clothes_masks_images_paths = instance_clothes_masks_images_paths
         
         self.num_instance_masked_images = len(self.instance_masked_images_path)
         self.num_instance_clothes_images = len(self.instance_clothes_images_path)
         self.num_instance_masks_images = len(self.instance_masks_path)
+        if clothes_version == 'v2':
+            self.num_instance_clothes_masks_images = len(self.instance_clothes_masks_images_paths)
+
 
         if self.instance_target_images_path is not None:
             self.num_instance_target_images = len(self.instance_target_images_path)
@@ -407,15 +430,22 @@ class ClothesDataset(Dataset):
 
         assert self.num_instance_clothes_images == self.num_instance_masked_images, "Number of images in clothes directory: {} is not equal to the number of masked images: {}".format(self.num_instance_clothes_images, self.num_instance_target_images)
         assert self.num_instance_clothes_images == self.num_instance_masks_images, "Number of mask images for inpainting: {} is not equal to the number of target images: {}".format(self.num_instance_masks_images, self.num_instance_clothes_images)
-        
+        if clothes_version == 'v2':
+            assert self.num_instance_clothes_masks_images == self.num_instance_masks_images, "Number of clothes mask images for inpainting: {} is not equal to the number of target images: {}".format(self.num_instance_masks_images, self.num_instance_clothes_images)
+
 
         self.instance_prompt = instance_prompt
         self._length = self.num_instance_clothes_images
 
+        # self.image_transforms_resize_and_crop = transforms.Compose(
+        #     [
+        #         transforms.Resize(size, interpolation=transforms.InterpolationMode.BILINEAR),
+        #          transforms.CenterCrop(size) 
+        #     ]
+        # )
         self.image_transforms_resize_and_crop = transforms.Compose(
             [
-                transforms.Resize(size, interpolation=transforms.InterpolationMode.BILINEAR),
-                 transforms.CenterCrop(size) 
+                transforms.Resize((size, size), interpolation=transforms.InterpolationMode.BILINEAR)
             ]
         )
 
@@ -438,6 +468,15 @@ class ClothesDataset(Dataset):
         instance_clothes = Image.open(self.instance_clothes_images_path[index])
         instance_masks = Image.open(self.instance_masks_path[index])
 
+        if self.clothes_version == 'v2':
+            instance_clothes_masks = Image.open(self.instance_clothes_masks_images_paths[index])
+            if not instance_clothes_masks.mode == "L":
+                instance_clothes_masks = instance_clothes_masks.convert("L")
+            instance_clothes_masks = self.image_transforms_resize_and_crop(instance_clothes_masks)
+            example["instance_clothes_masks"] = self.image_transforms(instance_clothes_masks)
+            import ipdb
+            ipdb.set_trace()
+
         if instance_target_image is not None:
             if not instance_target_image.mode == "RGB":
                 instance_target_image = instance_target_image.convert("RGB")
@@ -452,7 +491,7 @@ class ClothesDataset(Dataset):
             instance_masked_image = instance_masked_image.convert("RGB")
         if not instance_masks.mode == "L":
             instance_masks = instance_masks.convert("L")
-
+        
         instance_masked_image = self.image_transforms_resize_and_crop(instance_masked_image)
         instance_clothes = self.image_transforms_resize_and_crop(instance_clothes)
         instance_masks = self.image_transforms_resize_and_crop(instance_masks)
@@ -460,6 +499,7 @@ class ClothesDataset(Dataset):
 
         example["PIL_instance_masked"] = instance_masked_image
         example["PIL_instance_masks"] = instance_masks
+        example["PIL_instance_clothes_masks"] = instance_clothes_masks
         example["instance_masked"] = self.image_transforms(instance_masked_image)
         example["instance_clothes"] = self.image_transforms(instance_clothes)
         example["instance_masks"] = self.image_transforms(instance_masks)
@@ -470,7 +510,6 @@ class ClothesDataset(Dataset):
             truncation=True,
             max_length=self.tokenizer.model_max_length,
         ).input_ids
-
         return example
 
 def main():
@@ -525,19 +564,31 @@ def main():
 
     # 4) Load models and place ones that won't be trained on the device
     ###########################################################
-    models_dict = get_models(torch_dtype=weight_dtype, pretrained_name=args.pretrained_model_name_or_path, get_list=['text_encoder', 'vae', 'unet', 'pipeline'], clothes_version=args.clothes_version)
-    text_encoder, vae, unet, pipeline = models_dict['text_encoder'], models_dict['vae'], models_dict['unet'], models_dict['pipeline']
+    if args.clothes_version in ['v1', 'v2']:
+        models_dict = get_models(torch_dtype=weight_dtype, pretrained_name=args.pretrained_model_name_or_path, get_list=['text_encoder', 'vae', 'unet', 'pipeline'], clothes_version=args.clothes_version)
+        text_encoder, vae, unet, pipeline = models_dict['text_encoder'], models_dict['vae'], models_dict['unet'], models_dict['pipeline']
+    else:
+        raise NotImplementedError("Get model is not implemented for clothes model version {}".format(args.clothes_version))
+    
+    if args.clothes_version in ['v1', 'v2']:
+        vae.requires_grad_(False)
+        text_encoder.requires_grad_(False)
+    else: 
+        raise NotImplementedError("False gradient setting not impelmented for clothes version {}".format(args.clothes_version))
 
-    vae.requires_grad_(False)
-    text_encoder.requires_grad_(False)
-
-    place_on_device(device=device, weight_dtype=weight_dtype, models=[vae, pipeline, pipeline.text_encoder])
+    if args.clothes_version in ['v1', 'v2']:
+        place_on_device(device=device, weight_dtype=weight_dtype, models=[vae, pipeline, pipeline.text_encoder])
+    else:
+        raise NotImplementedError("Place on device not impelmented for clothes version {}".format(args.clothes_version))
     ###########################################################
 
     # 5) Set parameters for gradient checking and initialize optimizer/params to optimize
     ###########################################################
-    if args.gradient_checkpointing:
-        unet.enable_gradient_checkpointing()
+    if args.clothes_version in ['v1', 'v2']:
+        if args.gradient_checkpointing:
+            unet.enable_gradient_checkpointing()
+    else: 
+        raise NotImplementedError("Gradient checkpointing not impelmented for clothes version {}".format(args.clothes_version))
 
     if args.scale_lr:
         args.learning_rate = (
@@ -558,7 +609,7 @@ def main():
         optimizer_class = torch.optim.AdamW
 
     # Set parameters to optimize
-    if args.clothes_version == 'v1':
+    if args.clothes_version in ['v1', 'v2']:
         params_to_optimize = itertools.chain(unet.parameters())
     else:
         raise NotImplementedError("Optimization of version {} for modeling clothes is not yet implemented".format(args.clothes_version))
@@ -574,22 +625,27 @@ def main():
 
     # 6) Initialize dataset and dataloader, and prepare them along with the optimizer and unet
     ###########################################################
-    collate_fn = get_collate_function(tokenizer)
+    collate_fn = get_collate_function(tokenizer, clothes_version=args.clothes_version)
     train_dataset = ClothesDataset(
         instance_target_root=args.instance_target_dir,
         instance_masked_root=args.instance_masked_dir,
         instance_clothes_root=args.instance_clothes_dir,
         instance_mask_root=args.instance_masks_dir,
+        instance_clothes_mask_root=args.instance_clothes_masks_dir,
         instance_prompt="a person with a shirt",
         tokenizer=tokenizer,
         size=args.resolution,
         center_crop=args.center_crop,
+        clothes_version=args.clothes_version
     )
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset, batch_size=args.train_batch_size, shuffle=True, collate_fn=collate_fn
     )
 
-    unet, optimizer, train_dataloader = prepare_models_with_accelerator(accelerator, [unet, optimizer, train_dataloader])
+    if args.clothes_version in ['v1', 'v2']:
+        unet, optimizer, train_dataloader = prepare_models_with_accelerator(accelerator, [unet, optimizer, train_dataloader])
+    else: 
+        raise NotImplementedError("Prepared models {} for modeling clothes is not yet implemented".format(args.clothes_version))
     ###########################################################
     # Scheduler and math around the number of training steps.
     num_train_epochs, num_update_steps_per_epoch  = get_training_params(train_dataloader=train_dataloader, gradient_accumulation_steps=args.gradient_accumulation_steps, 
@@ -654,15 +710,18 @@ def main():
     for epoch in range(first_epoch, num_train_epochs):
         for step, batch in enumerate(train_dataloader):
             # 10) Set relevant model to train
-            if args.clothes_version == 'v1':
+            if args.clothes_version in ['v1', 'v2']:
                 unet.train()
                 pipeline.unet = unet
             else:
                 raise NotImplementedError("Training loop not implemented for clothes model version {}".format(args.clothes_version))
-            image=batch["pixel_values"]
-            mask_image=batch["masks"][0]
             
-            with accelerator.accumulate(unet) if args.clothes_version == "v1" else nullcontext() as gs:
+            if args.clothes_version in ['v1', 'v2']:
+                image=batch["pixel_values"]
+                mask_image=batch["masks"][0]
+            import ipdb
+            ipdb.set_trace()
+            with accelerator.accumulate(unet) if args.clothes_version in ["v1", 'v2'] else nullcontext() as gs:
                 noise_loss = 0
                 noise_loss_init_dict = {loss_key: 0 for loss_key in noise_loss_function_dict.keys()}
                 logs = { "idx": None, "epoch": None, "timestep": None}
@@ -671,33 +730,67 @@ def main():
                     if i == 0:
                         # 12) Initialize latents
                         prompt_embeds = None 
-                        clothes_latents, latents, mask, masked_image_latents, prompt_embeds, target_latents = get_init_latents(
+                        if args.clothes_version == 'v1':
+                            clothes_latents, latents, mask, masked_image_latents, prompt_embeds, target_latents = get_init_latents(
+                                vae=vae, pipeline=pipeline, unet=unet, batch=batch, image=image, mask_image=mask_image, height=height, width=width, generator=generator, 
+                                prompt=prompt, device=device, num_images_per_prompt=num_images_per_prompt, do_classifier_free_guidance=do_classifier_free_guidance, strength=strength, 
+                                negative_prompt=negative_prompt, lora_scale=text_encoder_lora_scale, prompt_embeds=prompt_embeds, negative_prompt_embeds=negative_prompt_embeds, t=t, batch_size=batch_size, weight_dtype=weight_dtype, 
+                                )
+                        elif args.clothes_version == 'v2':
+                            clothes_latents, latents, mask, masked_image_latents, clothes_mask, clothes_masked_image_latents, prompt_embeds, target_latents = get_init_latents(
                             vae=vae, pipeline=pipeline, unet=unet, batch=batch, image=image, mask_image=mask_image, height=height, width=width, generator=generator, 
                             prompt=prompt, device=device, num_images_per_prompt=num_images_per_prompt, do_classifier_free_guidance=do_classifier_free_guidance, strength=strength, 
                             negative_prompt=negative_prompt, lora_scale=text_encoder_lora_scale, prompt_embeds=prompt_embeds, negative_prompt_embeds=negative_prompt_embeds, t=t, batch_size=batch_size, weight_dtype=weight_dtype, 
-                            )
+                            clothes_version='v2')
+                        else:
+                            raise NotImplementedError("Get initial latents not implemented for clothes version {}".format(args.clothes_version))
                         noise = randn_tensor(target_latents.shape, generator=generator, device=device, dtype=weight_dtype)
 
                     # 13) Predict noise from latents and predict previous noisy sample
-                    latent_model_input = torch.cat([clothes_latents, latents], dim=1)
-                    latent_model_input = torch.cat([latent_model_input] * 2) if do_classifier_free_guidance else latent_model_input
+                    if args.clothes_version == 'v1':
+                        latent_model_input = torch.cat([clothes_latents, latents], dim=1)
+                        latent_model_input = torch.cat([latent_model_input] * 2) if do_classifier_free_guidance else latent_model_input
 
-                    latent_model_input = pipeline.scheduler.scale_model_input(latent_model_input, t)
+                        latent_model_input = pipeline.scheduler.scale_model_input(latent_model_input, t)
 
-                    latent_model_input = torch.cat([latent_model_input, mask, masked_image_latents], dim=1)
-                    noise_pred = unet(latent_model_input,
-                            t,
-                            encoder_hidden_states=prompt_embeds,
-                            cross_attention_kwargs=cross_attention_kwargs,
-                            return_dict=False,
-                        )[0]
+                        latent_model_input = torch.cat([latent_model_input, mask, masked_image_latents], dim=1)
+                        noise_pred = unet(latent_model_input,
+                                t,
+                                encoder_hidden_states=prompt_embeds,
+                                cross_attention_kwargs=cross_attention_kwargs,
+                                return_dict=False,
+                            )[0]
+                    elif args.clothes_version == 'v2':
+                        latent_model_input = torch.cat([latents], dim=1)
+                        latent_model_input = torch.cat([latent_model_input] * 2) if do_classifier_free_guidance else latent_model_input
+                        clothes_latent_model_input = torch.cat([clothes_latents], dim=1)
+                        clothes_latent_model_input = torch.cat([clothes_latent_model_input] * 2) if do_classifier_free_guidance else clothes_latent_model_input
+
+                        latent_model_input = pipeline.scheduler.scale_model_input(latent_model_input, t)
+                        clothes_latent_model_input = pipeline.scheduler.scale_model_input(clothes_latent_model_input, t)
+
+                        latent_model_input = torch.cat([latent_model_input, mask, masked_image_latents], dim=1)
+                        clothes_latent_model_input = torch.cat([clothes_latent_model_input, clothes_mask, clothes_masked_image_latents], dim=1)
+
+                        noise_pred = unet(latent_model_input,
+                                t,
+                                clothes_sample=clothes_latent_model_input,
+                                encoder_hidden_states=prompt_embeds,
+                                cross_attention_kwargs=cross_attention_kwargs,
+                                return_dict=False,
+                            )[0]
 
                     kwargs = {'eta': 0, 'generator': None}
                     if do_classifier_free_guidance:
                         noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
                         noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
                     latents = pipeline.scheduler.step(noise_pred, t, latents, **kwargs, return_dict=False)[0] #noise_scheduler.step(noise_pred, t, latents, return_dict=False)[0]
-                    clothes_latents = pipeline.scheduler.step(noise_pred, t, clothes_latents, **kwargs, return_dict=False)[0]
+                    if args.clothes_version == 'v1':
+                        clothes_latents = pipeline.scheduler.step(noise_pred, t, clothes_latents, **kwargs, return_dict=False)[0]
+                    elif args.clothes_version == 'v2':
+                        clothes_latents = pipeline.scheduler.step(noise_pred, t, clothes_latents, **kwargs, return_dict=False)[0]
+                    else:
+                        raise NotImplementedError("Clothes Latent processing not implemented for clothes model version {}".format(args.clothes_version))
                     _target_latents = pipeline.scheduler.add_noise(target_latents, noise, max((t-1, 0))) * pipeline.scheduler.init_noise_sigma
 
                     # 14) Calculate noisy loss
