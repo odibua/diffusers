@@ -165,14 +165,16 @@ def get_collate_function(tokenizer: CLIPTokenizer, clothes_version: str = "v1") 
         for example in examples:
             pil_image = example["PIL_instance_targets"] if "PIL_instance_targets" in example.keys() else example["PIL_instance_masked"]
             mask = example["PIL_instance_masks"]
-            clothes_mask = example["PIL_instance_clothes_masks"]
+           
             # prepare mask and masked image
             mask, masked_image = prepare_mask_and_masked_image(pil_image, mask)
-            clothes_mask, _ = prepare_mask_and_masked_image(pil_image, clothes_mask)
-
             masks.append(mask)
-            clothes_masks.append(clothes_mask)
             masked_images.append(masked_image)
+
+            if clothes_version == "v2":
+                clothes_mask = example["PIL_instance_clothes_masks"]
+                clothes_mask, _ = prepare_mask_and_masked_image(pil_image, clothes_mask)
+                clothes_masks.append(clothes_mask)
 
         pixel_values = torch.stack(pixel_values)
         pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
@@ -283,7 +285,7 @@ def get_init_latents(
         image: torch.tensor, mask_image: torch.tensor, height: float, width: float, generator: Generator, 
         prompt: str, device: str, num_images_per_prompt: int, do_classifier_free_guidance: bool, strength: float, 
         negative_prompt: str, lora_scale: Callable, prompt_embeds: torch.tensor, negative_prompt_embeds: torch.tensor, t: int, batch_size: int, weight_dtype: torch.dtype, 
-       clothes_version: str = 'v1', noise_close_latents: bool = True) -> Tuple[torch.tensor]:
+       clothes_version: str = 'v1', noise_clothes_latents: bool = True) -> Tuple[torch.tensor]:
 
         prompt_embeds = pipeline._encode_prompt(
         prompt,
@@ -321,24 +323,43 @@ def get_init_latents(
 
         clothes_latents = vae.encode(batch["clothes_pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
         clothes_latents = clothes_latents * vae.config.scaling_factor
-        latents_outputs = pipeline.prepare_latents(
-                        batch_size * num_images_per_prompt,
-                        num_channels_latents,
-                        height,
-                        width,
-                        prompt_embeds.dtype,
-                        device,
-                        generator,
-                        latents=latents,
-                        image=init_image,
-                        timestep=latent_timestep,
-                        is_strength_max=is_strength_max,
-                        return_noise=True,
-                        return_image_latents=return_image_latents,
-                    )
-        latents, _ = latents_outputs
 
-        if noise_close_latents:
+        if clothes_version == "v1":
+            latents_outputs = pipeline.prepare_latents(
+                batch_size * num_images_per_prompt,
+                num_channels_latents,
+                height,
+                width,
+                prompt_embeds.dtype,
+                device,
+                generator,
+                latents,
+                clothes_latents=clothes_latents,
+                image=init_image,
+                timestep=latent_timestep,
+                is_strength_max=is_strength_max,
+                return_noise=True,
+                return_image_latents=return_image_latents,
+            )
+            latents, clothes_latents, _ = latents_outputs
+        elif clothes_version == "v2":
+            latents_outputs = pipeline.prepare_latents(
+                            batch_size * num_images_per_prompt,
+                            num_channels_latents,
+                            height,
+                            width,
+                            prompt_embeds.dtype,
+                            device,
+                            generator,
+                            latents=latents,
+                            image=init_image,
+                            timestep=latent_timestep,
+                            is_strength_max=is_strength_max,
+                            return_noise=True,
+                            return_image_latents=return_image_latents,
+                        )
+            latents, _ = latents_outputs
+
             clothes_latents_outputs = pipeline.prepare_latents(
                     batch_size * num_images_per_prompt,
                     num_channels_latents,
@@ -347,7 +368,7 @@ def get_init_latents(
                     prompt_embeds.dtype,
                     device,
                     generator,
-                    latents=clothes_latents,
+                    latents=clothes_init_image,
                     image=clothes_init_image,
                     timestep=latent_timestep,
                     is_strength_max=is_strength_max,

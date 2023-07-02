@@ -474,6 +474,8 @@ class ClothesDataset(Dataset):
                 instance_clothes_masks = instance_clothes_masks.convert("L")
             instance_clothes_masks = self.image_transforms_resize_and_crop(instance_clothes_masks)
             example["instance_clothes_masks"] = self.image_transforms(instance_clothes_masks)
+            example["PIL_instance_clothes_masks"] = instance_clothes_masks
+
 
         if instance_target_image is not None:
             if not instance_target_image.mode == "RGB":
@@ -497,7 +499,6 @@ class ClothesDataset(Dataset):
 
         example["PIL_instance_masked"] = instance_masked_image
         example["PIL_instance_masks"] = instance_masks
-        example["PIL_instance_clothes_masks"] = instance_clothes_masks
         example["instance_masked"] = self.image_transforms(instance_masked_image)
         example["instance_clothes"] = self.image_transforms(instance_clothes)
         example["instance_masks"] = self.image_transforms(instance_masks)
