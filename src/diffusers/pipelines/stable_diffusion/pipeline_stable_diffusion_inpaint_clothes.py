@@ -660,10 +660,12 @@ class StableDiffusionInpaintClothesPipeline(DiffusionPipeline, TextualInversionL
         else:
             noise = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
             latents = self.scheduler.add_noise(latents, noise, timestep) * self.scheduler.init_noise_sigma
-            clothes_noise = noise
-            clothes_latents = self.scheduler.add_noise(clothes_latents, clothes_noise, timestep) * self.scheduler.init_noise_sigma
+            if clothes_latents is not None:
+                clothes_noise = noise
+                clothes_latents = self.scheduler.add_noise(clothes_latents, clothes_noise, timestep) * self.scheduler.init_noise_sigma
 
-        outputs = (latents, clothes_latents)
+        
+        outputs = (latents, clothes_latents) if clothes_latents is not None else (latents,)
 
         if return_noise:
             outputs += (noise,)
