@@ -360,24 +360,6 @@ def get_init_latents(
                         )
             latents, _ = latents_outputs
 
-            clothes_latents_outputs = pipeline.prepare_latents(
-                    batch_size * num_images_per_prompt,
-                    num_channels_latents,
-                    height,
-                    width,
-                    prompt_embeds.dtype,
-                    device,
-                    generator,
-                    latents=clothes_init_image,
-                    image=clothes_init_image,
-                    timestep=latent_timestep,
-                    is_strength_max=is_strength_max,
-                    return_noise=True,
-                    return_image_latents=return_image_latents,
-                )
-
-            clothes_latents, _ = clothes_latents_outputs
-
         mask, masked_image_latents = pipeline.prepare_mask_latents(
                             mask,
                             masked_image,

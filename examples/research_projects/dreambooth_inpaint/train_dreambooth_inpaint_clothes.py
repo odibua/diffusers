@@ -739,7 +739,7 @@ def main():
                             vae=vae, pipeline=pipeline, unet=unet, batch=batch, image=image, mask_image=mask_image, height=height, width=width, generator=generator, 
                             prompt=prompt, device=device, num_images_per_prompt=num_images_per_prompt, do_classifier_free_guidance=do_classifier_free_guidance, strength=strength, 
                             negative_prompt=negative_prompt, lora_scale=text_encoder_lora_scale, prompt_embeds=prompt_embeds, negative_prompt_embeds=negative_prompt_embeds, t=t, batch_size=batch_size, weight_dtype=weight_dtype, 
-                            clothes_version='v2', noise_close_latents=False)
+                            clothes_version='v2')
                         else:
                             raise NotImplementedError("Get initial latents not implemented for clothes version {}".format(args.clothes_version))
                         noise = randn_tensor(target_latents.shape, generator=generator, device=device, dtype=weight_dtype)
@@ -761,22 +761,9 @@ def main():
                     elif args.clothes_version == 'v2':
                         latent_model_input = torch.cat([latents], dim=1)
                         latent_model_input = torch.cat([latent_model_input] * 2) if do_classifier_free_guidance else latent_model_input
-                        # clothes_latent_model_input = torch.cat([clothes_latents], dim=1)
-                        # clothes_latent_model_input = torch.cat([clothes_latent_model_input] * 2) if do_classifier_free_guidance else clothes_latent_model_input
-
                         latent_model_input = pipeline.scheduler.scale_model_input(latent_model_input, t)
-                        # clothes_latent_model_input = pipeline.scheduler.scale_model_input(clothes_latent_model_input, t)
 
                         latent_model_input = torch.cat([latent_model_input, mask, masked_image_latents], dim=1)
-                        # clothes_latent_model_input = torch.cat([clothes_latent_model_input, clothes_mask, clothes_masked_image_latents], dim=1)
-
-                        # noise_pred = unet(latent_model_input,
-                        #         t,
-                        #         clothes_sample=clothes_latent_model_input,
-                        #         encoder_hidden_states=prompt_embeds,
-                        #         cross_attention_kwargs=cross_attention_kwargs,
-                        #         return_dict=False,
-                        #     )[0]
                         noise_pred = unet(latent_model_input,
                                 t,
                                 clothes_latent=torch.cat([clothes_latents, clothes_latents]),
