@@ -188,6 +188,14 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--num_loops_per_example",
+        type=int,
+        default=5,
+        help=(
+            "Number of times a training loop is iterated on for a single piece of clothing"
+        ),
+    )
+    parser.add_argument(
         "--output_dir",
         type=str,
         default="text-inversion-model",
@@ -396,7 +404,7 @@ class ClothesDataset(Dataset):
             if not self.instance_mask_root.exists():
                 raise ValueError("Instance mask root doesn't exists.")
             
-            if clothes_version == 'v2':
+            if clothes_version in ['v2', 'v3', 'v4']:
                 self.instance_clothes_mask_root = Path(instance_clothes_mask_root)
                 if not self.instance_clothes_mask_root.exists():
                     raise ValueError("Instance clothes mask root doesn't exists.")
@@ -405,7 +413,7 @@ class ClothesDataset(Dataset):
             instance_clothes_images_paths = [Path(instance_clothes_root) / target_image_path.name for target_image_path in self.instance_target_images_path] 
             instance_masks_images_paths = [Path(instance_mask_root) / target_image_path.name for target_image_path in self.instance_target_images_path] 
             instance_masked_images_paths = [Path(instance_masked_root) / target_image_path.name for target_image_path in self.instance_target_images_path] 
-            if clothes_version == 'v2':
+            if clothes_version in ['v2', 'v3', 'v4']:
                 instance_clothes_masks_images_paths = [Path(instance_clothes_mask_root) / target_image_path.name for target_image_path in self.instance_target_images_path] 
         else:
             self.instance_target_images_path = None
@@ -413,13 +421,13 @@ class ClothesDataset(Dataset):
         self.instance_masked_images_path = instance_masked_images_paths  
         self.instance_clothes_images_path = instance_clothes_images_paths
         self.instance_masks_path = instance_masks_images_paths
-        if clothes_version == 'v2':
+        if clothes_version in ['v2', 'v3', 'v4']:
             self.instance_clothes_masks_images_paths = instance_clothes_masks_images_paths
         
         self.num_instance_masked_images = len(self.instance_masked_images_path)
         self.num_instance_clothes_images = len(self.instance_clothes_images_path)
         self.num_instance_masks_images = len(self.instance_masks_path)
-        if clothes_version == 'v2':
+        if clothes_version in ['v2', 'v3', 'v4']:
             self.num_instance_clothes_masks_images = len(self.instance_clothes_masks_images_paths)
 
 
@@ -430,19 +438,13 @@ class ClothesDataset(Dataset):
 
         assert self.num_instance_clothes_images == self.num_instance_masked_images, "Number of images in clothes directory: {} is not equal to the number of masked images: {}".format(self.num_instance_clothes_images, self.num_instance_target_images)
         assert self.num_instance_clothes_images == self.num_instance_masks_images, "Number of mask images for inpainting: {} is not equal to the number of target images: {}".format(self.num_instance_masks_images, self.num_instance_clothes_images)
-        if clothes_version == 'v2':
+        if clothes_version in ['v2', 'v3', 'v4']:
             assert self.num_instance_clothes_masks_images == self.num_instance_masks_images, "Number of clothes mask images for inpainting: {} is not equal to the number of target images: {}".format(self.num_instance_masks_images, self.num_instance_clothes_images)
 
 
         self.instance_prompt = instance_prompt
         self._length = self.num_instance_clothes_images
 
-        # self.image_transforms_resize_and_crop = transforms.Compose(
-        #     [
-        #         transforms.Resize(size, interpolation=transforms.InterpolationMode.BILINEAR),
-        #          transforms.CenterCrop(size) 
-        #     ]
-        # )
         self.image_transforms_resize_and_crop = transforms.Compose(
             [
                 transforms.Resize((size, size), interpolation=transforms.InterpolationMode.BILINEAR)
@@ -468,7 +470,7 @@ class ClothesDataset(Dataset):
         instance_clothes = Image.open(self.instance_clothes_images_path[index])
         instance_masks = Image.open(self.instance_masks_path[index])
 
-        if self.clothes_version == 'v2':
+        if self.clothes_version in ['v2', 'v3', 'v4']:
             instance_clothes_masks = Image.open(self.instance_clothes_masks_images_paths[index])
             if not instance_clothes_masks.mode == "L":
                 instance_clothes_masks = instance_clothes_masks.convert("L")
@@ -563,19 +565,19 @@ def main():
 
     # 4) Load models and place ones that won't be trained on the device
     ###########################################################
-    if args.clothes_version in ['v1', 'v2']:
+    if args.clothes_version in ['v1', 'v2', 'v3', 'v4']:
         models_dict = get_models(torch_dtype=weight_dtype, pretrained_name=args.pretrained_model_name_or_path, get_list=['text_encoder', 'vae', 'unet', 'pipeline'], clothes_version=args.clothes_version)
         text_encoder, vae, unet, pipeline = models_dict['text_encoder'], models_dict['vae'], models_dict['unet'], models_dict['pipeline']
     else:
         raise NotImplementedError("Get model is not implemented for clothes model version {}".format(args.clothes_version))
     
-    if args.clothes_version in ['v1', 'v2']:
+    if args.clothes_version in ['v1', 'v2', 'v3', 'v4']:
         vae.requires_grad_(False)
         text_encoder.requires_grad_(False)
     else: 
         raise NotImplementedError("False gradient setting not impelmented for clothes version {}".format(args.clothes_version))
 
-    if args.clothes_version in ['v1', 'v2']:
+    if args.clothes_version in ['v1', 'v2', 'v3', 'v4']:
         place_on_device(device=device, weight_dtype=weight_dtype, models=[vae, pipeline, pipeline.text_encoder])
     else:
         raise NotImplementedError("Place on device not impelmented for clothes version {}".format(args.clothes_version))
@@ -583,7 +585,7 @@ def main():
 
     # 5) Set parameters for gradient checking and initialize optimizer/params to optimize
     ###########################################################
-    if args.clothes_version in ['v1', 'v2']:
+    if args.clothes_version in ['v1', 'v2', 'v3', 'v4']:
         if args.gradient_checkpointing:
             unet.enable_gradient_checkpointing()
     else: 
@@ -608,7 +610,7 @@ def main():
         optimizer_class = torch.optim.AdamW
 
     # Set parameters to optimize
-    if args.clothes_version in ['v1', 'v2']:
+    if args.clothes_version in ['v1', 'v2', 'v3', 'v4']:
         params_to_optimize = itertools.chain(unet.parameters())
     else:
         raise NotImplementedError("Optimization of version {} for modeling clothes is not yet implemented".format(args.clothes_version))
@@ -641,7 +643,7 @@ def main():
         train_dataset, batch_size=args.train_batch_size, shuffle=True, collate_fn=collate_fn
     )
 
-    if args.clothes_version in ['v1', 'v2']:
+    if args.clothes_version in ['v1', 'v2', 'v3', 'v4']:
         unet, optimizer, train_dataloader = prepare_models_with_accelerator(accelerator, [unet, optimizer, train_dataloader])
     else: 
         raise NotImplementedError("Prepared models {} for modeling clothes is not yet implemented".format(args.clothes_version))
@@ -709,146 +711,146 @@ def main():
     for epoch in range(first_epoch, num_train_epochs):
         for step, batch in enumerate(train_dataloader):
             # 10) Set relevant model to train
-            if args.clothes_version in ['v1', 'v2']:
+            if args.clothes_version in ['v1', 'v2', 'v3', 'v4']:
                 unet.train()
                 pipeline.unet = unet
             else:
                 raise NotImplementedError("Training loop not implemented for clothes model version {}".format(args.clothes_version))
             
-            if args.clothes_version in ['v1', 'v2']:
+            if args.clothes_version in ['v1', 'v2', 'v3', 'v4']:
                 image=batch["pixel_values"]
                 mask_image=batch["masks"][0]
-
-            with accelerator.accumulate(unet) if args.clothes_version in ["v1", 'v2'] else nullcontext() as gs:
-                noise_loss = 0
-                noise_loss_init_dict = {loss_key: 0 for loss_key in noise_loss_function_dict.keys()}
-                logs = { "idx": None, "epoch": None, "timestep": None}
-                for i, t in enumerate(timesteps):
-                    logs["idx"], logs["epoch"], logs["timestep"] = i, epoch, t
-                    if i == 0:
-                        # 12) Initialize latents
-                        prompt_embeds = None 
-                        if args.clothes_version == 'v1':
-                            clothes_latents, latents, mask, masked_image_latents, prompt_embeds, target_latents = get_init_latents(
+            for loop_idx in range(args.num_loops_per_example):
+                with accelerator.accumulate(unet) if args.clothes_version in ["v1", 'v2', 'v3', 'v4'] else nullcontext() as gs:
+                    noise_loss = 0
+                    noise_loss_init_dict = {loss_key: 0 for loss_key in noise_loss_function_dict.keys()}
+                    logs = { "idx": None, "epoch": None, "timestep": None}
+                    for i, t in enumerate(timesteps):
+                        logs["idx"], logs["epoch"], logs["timestep"] = i, epoch, t
+                        if i == 0:
+                            # 12) Initialize latents
+                            prompt_embeds = None 
+                            if args.clothes_version == 'v1':
+                                clothes_latents, latents, mask, masked_image_latents, prompt_embeds, target_latents = get_init_latents(
+                                    vae=vae, pipeline=pipeline, unet=unet, batch=batch, image=image, mask_image=mask_image, height=height, width=width, generator=generator, 
+                                    prompt=prompt, device=device, num_images_per_prompt=num_images_per_prompt, do_classifier_free_guidance=do_classifier_free_guidance, strength=strength, 
+                                    negative_prompt=negative_prompt, lora_scale=text_encoder_lora_scale, prompt_embeds=prompt_embeds, negative_prompt_embeds=negative_prompt_embeds, t=t, batch_size=batch_size, weight_dtype=weight_dtype, 
+                                    )
+                            elif args.clothes_version in ['v2', 'v3', 'v4']:
+                                clothes_latents, latents, mask, masked_image_latents, clothes_mask, clothes_masked_image_latents, prompt_embeds, target_latents = get_init_latents(
                                 vae=vae, pipeline=pipeline, unet=unet, batch=batch, image=image, mask_image=mask_image, height=height, width=width, generator=generator, 
                                 prompt=prompt, device=device, num_images_per_prompt=num_images_per_prompt, do_classifier_free_guidance=do_classifier_free_guidance, strength=strength, 
                                 negative_prompt=negative_prompt, lora_scale=text_encoder_lora_scale, prompt_embeds=prompt_embeds, negative_prompt_embeds=negative_prompt_embeds, t=t, batch_size=batch_size, weight_dtype=weight_dtype, 
-                                )
-                        elif args.clothes_version == 'v2':
-                            clothes_latents, latents, mask, masked_image_latents, clothes_mask, clothes_masked_image_latents, prompt_embeds, target_latents = get_init_latents(
-                            vae=vae, pipeline=pipeline, unet=unet, batch=batch, image=image, mask_image=mask_image, height=height, width=width, generator=generator, 
-                            prompt=prompt, device=device, num_images_per_prompt=num_images_per_prompt, do_classifier_free_guidance=do_classifier_free_guidance, strength=strength, 
-                            negative_prompt=negative_prompt, lora_scale=text_encoder_lora_scale, prompt_embeds=prompt_embeds, negative_prompt_embeds=negative_prompt_embeds, t=t, batch_size=batch_size, weight_dtype=weight_dtype, 
-                            clothes_version='v2')
+                                clothes_version=args.clothes_version)
+                            else:
+                                raise NotImplementedError("Get initial latents not implemented for clothes version {}".format(args.clothes_version))
+                            noise = randn_tensor(target_latents.shape, generator=generator, device=device, dtype=weight_dtype)
+
+                        # 13) Predict noise from latents and predict previous noisy sample
+                        if args.clothes_version == 'v1':
+                            latent_model_input = torch.cat([clothes_latents, latents], dim=1)
+                            latent_model_input = torch.cat([latent_model_input] * 2) if do_classifier_free_guidance else latent_model_input
+
+                            latent_model_input = pipeline.scheduler.scale_model_input(latent_model_input, t)
+
+                            latent_model_input = torch.cat([latent_model_input, mask, masked_image_latents], dim=1)
+                            noise_pred = unet(latent_model_input,
+                                    t,
+                                    encoder_hidden_states=prompt_embeds,
+                                    cross_attention_kwargs=cross_attention_kwargs,
+                                    return_dict=False,
+                                )[0]
+                        elif args.clothes_version in ['v2', 'v3', 'v4']:
+                            latent_model_input = torch.cat([latents], dim=1)
+                            latent_model_input = torch.cat([latent_model_input] * 2) if do_classifier_free_guidance else latent_model_input
+                            latent_model_input = pipeline.scheduler.scale_model_input(latent_model_input, t)
+
+                            latent_model_input = torch.cat([latent_model_input, mask, masked_image_latents], dim=1)
+                            noise_pred = unet(latent_model_input,
+                                    t,
+                                    clothes_latent=torch.cat([clothes_latents, clothes_latents]),
+                                    encoder_hidden_states=prompt_embeds,
+                                    cross_attention_kwargs=cross_attention_kwargs,
+                                    return_dict=False,
+                                )[0]
+
+                        kwargs = {'eta': 0, 'generator': None}
+                        if do_classifier_free_guidance:
+                            noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                            noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+                        latents = pipeline.scheduler.step(noise_pred, t, latents, **kwargs, return_dict=False)[0] #noise_scheduler.step(noise_pred, t, latents, return_dict=False)[0]
+                        if args.clothes_version == 'v1':
+                            clothes_latents = pipeline.scheduler.step(noise_pred, t, clothes_latents, **kwargs, return_dict=False)[0]
+                        elif args.clothes_version in ['v2', 'v3', 'v4']:
+                            pass
+                            # clothes_latents = pipeline.scheduler.step(noise_pred, t, clothes_latents, **kwargs, return_dict=False)[0]
                         else:
-                            raise NotImplementedError("Get initial latents not implemented for clothes version {}".format(args.clothes_version))
-                        noise = randn_tensor(target_latents.shape, generator=generator, device=device, dtype=weight_dtype)
+                            raise NotImplementedError("Clothes Latent processing not implemented for clothes model version {}".format(args.clothes_version))
+                        _target_latents = pipeline.scheduler.add_noise(target_latents, noise, max((t-1, 0))) * pipeline.scheduler.init_noise_sigma
 
-                    # 13) Predict noise from latents and predict previous noisy sample
-                    if args.clothes_version == 'v1':
-                        latent_model_input = torch.cat([clothes_latents, latents], dim=1)
-                        latent_model_input = torch.cat([latent_model_input] * 2) if do_classifier_free_guidance else latent_model_input
+                        # 14) Calculate noisy loss
+                        for loss_key in noise_loss_function_dict.keys():
+                            loss_weight, loss_func = noise_loss_function_dict[loss_key]
+                            noise_loss_init_dict[loss_key] = noise_loss_init_dict[loss_key] + loss_weight * loss_func(latents.float(), _target_latents.float())
 
-                        latent_model_input = pipeline.scheduler.scale_model_input(latent_model_input, t)
+                    logs.update({loss_key: noise_loss_init_dict[loss_key] for loss_key in noise_loss_init_dict.keys()})
 
-                        latent_model_input = torch.cat([latent_model_input, mask, masked_image_latents], dim=1)
-                        noise_pred = unet(latent_model_input,
-                                t,
-                                encoder_hidden_states=prompt_embeds,
-                                cross_attention_kwargs=cross_attention_kwargs,
-                                return_dict=False,
-                            )[0]
-                    elif args.clothes_version == 'v2':
-                        latent_model_input = torch.cat([latents], dim=1)
-                        latent_model_input = torch.cat([latent_model_input] * 2) if do_classifier_free_guidance else latent_model_input
-                        latent_model_input = pipeline.scheduler.scale_model_input(latent_model_input, t)
-
-                        latent_model_input = torch.cat([latent_model_input, mask, masked_image_latents], dim=1)
-                        noise_pred = unet(latent_model_input,
-                                t,
-                                clothes_latent=torch.cat([clothes_latents, clothes_latents]),
-                                encoder_hidden_states=prompt_embeds,
-                                cross_attention_kwargs=cross_attention_kwargs,
-                                return_dict=False,
-                            )[0]
-
-                    kwargs = {'eta': 0, 'generator': None}
-                    if do_classifier_free_guidance:
-                        noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                        noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
-                    latents = pipeline.scheduler.step(noise_pred, t, latents, **kwargs, return_dict=False)[0] #noise_scheduler.step(noise_pred, t, latents, return_dict=False)[0]
-                    if args.clothes_version == 'v1':
-                        clothes_latents = pipeline.scheduler.step(noise_pred, t, clothes_latents, **kwargs, return_dict=False)[0]
-                    elif args.clothes_version == 'v2':
-                        pass
-                        # clothes_latents = pipeline.scheduler.step(noise_pred, t, clothes_latents, **kwargs, return_dict=False)[0]
-                    else:
-                        raise NotImplementedError("Clothes Latent processing not implemented for clothes model version {}".format(args.clothes_version))
-                    _target_latents = pipeline.scheduler.add_noise(target_latents, noise, max((t-1, 0))) * pipeline.scheduler.init_noise_sigma
-
-                    # 14) Calculate noisy loss
+                    # 15) Average noisy loss
                     for loss_key in noise_loss_function_dict.keys():
-                        loss_weight, loss_func = noise_loss_function_dict[loss_key]
-                        noise_loss_init_dict[loss_key] = noise_loss_init_dict[loss_key] + loss_weight * loss_func(latents.float(), _target_latents.float())
+                        noise_loss = noise_loss + noise_loss_init_dict[loss_key]
+                    noise_loss = noise_loss / len(timesteps)
+                    logs.update({'noise_loss': noise_loss})
 
-                logs.update({loss_key: noise_loss_init_dict[loss_key] for loss_key in noise_loss_init_dict.keys()})
+                    _image =  vae.decode(latents.to(weight_dtype) / vae.config.scaling_factor, return_dict=False)[0]
+                    _target = vae.decode(target_latents.to(weight_dtype) / vae.config.scaling_factor, return_dict=False)[0]
+                    
 
-                # 15) Average noisy loss
-                for loss_key in noise_loss_function_dict.keys():
-                    noise_loss = noise_loss + noise_loss_init_dict[loss_key]
-                noise_loss = noise_loss / len(timesteps)
-                logs.update({'noise_loss': noise_loss})
+                    # 16) Calculate loss
+                    loss = 0
+                    for loss_key in loss_function_dict.keys():
+                        loss_weight, loss_func = loss_function_dict[loss_key]
+                        _loss = loss_weight * loss_func(latents.float(), _target_latents.float())
+                        loss = loss + _loss
+                        logs.update({loss_key: _loss})
+                    logs.update({'loss': loss})
 
-                _image =  vae.decode(latents.to(weight_dtype) / vae.config.scaling_factor, return_dict=False)[0]
-                _target = vae.decode(target_latents.to(weight_dtype) / vae.config.scaling_factor, return_dict=False)[0]
-                
+                    # 16) Calculate backward loss
+                    accelerator.backward(loss)
+                    if accelerator.sync_gradients:
+                        params_to_clip = (
+                            itertools.chain(unet.parameters(), text_encoder.parameters())
+                            if args.train_text_encoder
+                            else unet.parameters()
+                        )
+                        accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
+                    optimizer.step()
+                    optimizer.zero_grad()
 
-                # 16) Calculate loss
-                loss = 0
-                for loss_key in loss_function_dict.keys():
-                    loss_weight, loss_func = loss_function_dict[loss_key]
-                    _loss = loss_weight * loss_func(latents.float(), _target_latents.float())
-                    loss = loss + _loss
-                    logs.update({loss_key: _loss})
-                logs.update({'loss': loss})
+                    # Checks if the accelerator has performed an optimization step behind the scenes
+                    if accelerator.sync_gradients:
+                        # progress_bar.update(1)
+                        global_step += 1
 
-                # 16) Calculate backward loss
-                accelerator.backward(loss)
-                if accelerator.sync_gradients:
-                    params_to_clip = (
-                        itertools.chain(unet.parameters(), text_encoder.parameters())
-                        if args.train_text_encoder
-                        else unet.parameters()
-                    )
-                    accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
-                optimizer.step()
-                optimizer.zero_grad()
+                    # 17) Write columns and save models at checkpointings
+                    if epoch == 0:
+                        cols = [key for key in logs.keys()]
+                        with open(f"{os.path.join(args.output_dir,'loss_log.txt')}", "a") as fObj:
+                                fObj.write("{}\n".format(','.join(cols)))
+                    print(f"{global_step}: {logs} ")
 
-                # Checks if the accelerator has performed an optimization step behind the scenes
-                if accelerator.sync_gradients:
-                    # progress_bar.update(1)
-                    global_step += 1
-
-                # 17) Write columns and save models at checkpointings
-                if epoch == 0:
-                    cols = [key for key in logs.keys()]
-                    with open(f"{os.path.join(args.output_dir,'loss_log.txt')}", "a") as fObj:
-                            fObj.write("{}\n".format(','.join(cols)))
-                print(f"{global_step}: {logs} ")
-
-                if global_step % args.checkpointing_steps == 0 or global_step == 1 or global_step % 2 == 0:
-                    if accelerator.is_main_process:
-                        vals_to_write = [str(logs[key]) for key in cols]
-                        with open(f"{os.path.join(args.output_dir,'loss_logg.txt')}", "a") as fObj:
-                            fObj.write("{}\n".format(','.join(vals_to_write)))
-                        save_path = os.path.join(args.output_dir, f"checkpoint-{epoch}-{step}-{i}-{global_step}")
-                        target_save_path = os.path.join(args.output_dir,f"target-{epoch}-{step}-{i}-{global_step}.png")
-                        gen_save_path = os.path.join(args.output_dir,f"get-{epoch}-{step}-{i}-{global_step}.png")
-                        if global_step % args.checkpointing_steps == 0:
-                            accelerator.save_state(save_path)
-                        inv_transform(_target[0] * 0.5 + 0.5).save(target_save_path)
-                        inv_transform(_image[0] * 0.5 + 0.5).save(gen_save_path)
-                        logger.info(f"Saved state to {save_path}")
+                    if global_step % args.checkpointing_steps == 0 or loop_idx == 0 or loop_idx % (args.num_loops_per_example - 1) == 0:
+                        if accelerator.is_main_process:
+                            vals_to_write = [str(logs[key]) for key in cols]
+                            with open(f"{os.path.join(args.output_dir,'loss_logg.txt')}", "a") as fObj:
+                                fObj.write("{}\n".format(','.join(vals_to_write)))
+                            save_path = os.path.join(args.output_dir, f"checkpoint-{epoch}-{step}-{i}-{global_step}-{loop_idx}")
+                            target_save_path = os.path.join(args.output_dir,f"target-{epoch}-{step}-{i}-{global_step}-{loop_idx}.png")
+                            gen_save_path = os.path.join(args.output_dir,f"get-{epoch}-{step}-{i}-{global_step}-{loop_idx}.png")
+                            if global_step % args.checkpointing_steps == 0:
+                                accelerator.save_state(save_path)
+                            inv_transform(_target[0] * 0.5 + 0.5).save(target_save_path)
+                            inv_transform(_image[0] * 0.5 + 0.5).save(gen_save_path)
+                            logger.info(f"Saved state to {save_path}")
         accelerator.wait_for_everyone()
 
     # Create the pipeline using using the trained modules and save it.
