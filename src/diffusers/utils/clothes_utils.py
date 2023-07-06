@@ -135,15 +135,59 @@ def get_models(torch_dtype: torch.dtype, pretrained_name: str, get_list: List[st
     else:
         models_dict.update({'pipeline': None})
 
-    if 'eval_clothes_v1' in get_list:
-        unet = UNet2DConditionModel.from_pretrained(pretrained_name, subfolder="unet")
-        clothes_unet = get_clothes_unet(unet)
-        checkpoint = torch.load(checkpoint)
-        clothes_unet.load_state_dict(checkpoint)
-        clothes_unet.eval()
-        models_dict.update({'eval_clothes_v1': clothes_unet})
-    else: 
-        models_dict.update({'eval_clothes_v1': None})
+    if 'eval_clothes' in get_list:
+        if clothes_version == 'v1':
+            unet = UNet2DConditionModel.from_pretrained(pretrained_name, subfolder="unet")
+            clothes_unet = get_clothes_unet(unet)
+            checkpoint = torch.load(checkpoint)
+            clothes_unet.load_state_dict(checkpoint)
+            clothes_unet.eval()
+            models_dict.update({'eval_clothes': clothes_unet})
+        elif clothes_version == 'v2':
+            unet = UNet2DConditionClothesLatentsModel.from_pretrained(
+                                                            pretrained_name, 
+                                                            subfolder="unet", 
+                                                            low_cpu_mem_usage=False,
+                                                            device_map=None
+                                                        )
+            checkpoint = torch.load(checkpoint)
+            unet.load_state_dict(checkpoint)
+            unet.eval()
+            models_dict.update({'eval_clothes': unet})
+        elif clothes_version == 'v3':
+            unet = UNet2DConditionClothesInterpLatentsModel.from_pretrained(
+                                                                        pretrained_name, 
+                                                                        subfolder="unet", 
+                                                                        low_cpu_mem_usage=False,
+                                                                        device_map=None
+                                                                    )
+            checkpoint = torch.load(checkpoint)
+            unet.load_state_dict(checkpoint)
+            unet.eval()
+            models_dict.update({'eval_clothes': unet})
+        elif clothes_version == 'v4':
+            unet = UNet2DConditionClothesConvLatentsModel.from_pretrained(
+                                                            pretrained_name, 
+                                                            subfolder="unet", 
+                                                            low_cpu_mem_usage=False,
+                                                            device_map=None
+                                                        )
+            checkpoint = torch.load(checkpoint)
+            unet.load_state_dict(checkpoint)
+            unet.eval()
+            models_dict.update({'eval_clothes': unet})
+        else:
+            models_dict.update({'eval_clothes': None})
+
+    # if 'eval_clothes_v1' in get_list:
+    #     unet = UNet2DConditionModel.from_pretrained(pretrained_name, subfolder="unet")
+    #     clothes_unet = get_clothes_unet(unet)
+    #     checkpoint = torch.load(checkpoint)
+    #     clothes_unet.load_state_dict(checkpoint)
+    #     clothes_unet.eval()
+    #     models_dict.update({'eval_clothes_v1': clothes_unet})
+    # else: 
+    #     models_dict.update({'eval_clothes_v1': None})
 
     return models_dict
 
@@ -217,8 +261,8 @@ def get_collate_function(tokenizer: CLIPTokenizer, clothes_version: str = "v1") 
         else:
             if clothes_version == "v1":
                 batch = {"input_ids": input_ids, "pixel_values": pixel_values, "clothes_pixel_values": clothes_pixel_values, "masks": masks, "masked_images": masked_images}
-            elif clothes_version == "v2":
-                batch = {"input_ids": input_ids, "pixel_values": pixel_values, "clothes_pixel_values": clothes_pixel_values, "clothes_pixel_values": clothes_pixel_values, "masks": masks, "masked_images": masked_images}
+            elif clothes_version in ["v2", "v3", "v4"]:
+                batch = {"input_ids": input_ids, "pixel_values": pixel_values, "clothes_pixel_values": clothes_pixel_values, "instance_clothes_masks": clothes_masks, "masks": masks, "masked_images": masked_images}
             else:
                 raise NotImplementedError("Batch return not implemented for clothes version {}".format(clothes_version))
 

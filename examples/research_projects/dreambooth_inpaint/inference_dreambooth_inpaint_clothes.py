@@ -183,15 +183,28 @@ def main():
         if args.output_dir is not None:
             os.makedirs(args.output_dir, exist_ok=True)
 
+    # Load the tokenizer
+    if args.tokenizer_name:
+        tokenizer = get_tokenizer(tokenizer_name=args.tokenizer_name)
+    elif args.pretrained_model_name_or_path:
+        tokenizer = get_tokenizer(pretrained_model_name=args.pretrained_model_name_or_path)
+        
+
     weight_dtype = torch.float16 if accelerator.device.type == "cuda" else torch.float32
     # Load models
-    models_dict = get_models(torch_dtype=weight_dtype, pretrained_name=args.pretrained_model_name_or_path, checkpoint=args.checkpoint, get_list=['vae', 'pipeline', 'eval_clothes_v1'], clothes_version=args.clothes_version)
-    vae, pipeline, clothes_unet = models_dict['vae'], models_dict['pipeline'], models_dict['eval_clothes_v1']
-    vae.requires_grad_(False)
+    if args.clothes_version in ['v1', 'v2', 'v3', 'v4']:
+        models_dict = get_models(torch_dtype=weight_dtype, pretrained_name=args.pretrained_model_name_or_path, checkpoint=args.checkpoint, get_list=['vae', 'pipeline', 'eval_clothes'], clothes_version=args.clothes_version)
+        vae, pipeline, clothes_unet = models_dict['vae'], models_dict['pipeline'], models_dict['eval_clothes']
+    else:
+        raise NotImplementedError("Get model is not implemented for clothes model version {}".format(args.clothes_version))
+    
+    if args.clothes_version in ['v1', 'v2', 'v3', 'v4']:
+        vae.requires_grad_(False)
+    else:
+        raise NotImplementedError("False gradient setting not impelmented for clothes version {}".format(args.clothes_version))
 
-    # Load the tokenizer
-    tokenizer = get_tokenizer(pretrained_model_name=args.pretrained_model_name_or_path)
-    collate_fn = get_collate_function(tokenizer)
+
+    collate_fn = get_collate_function(tokenizer, clothes_version=args.clothes_version)
 
     inference_results_df = pd.read_csv(args.person_clothes_file)
     
@@ -203,10 +216,12 @@ def main():
         instance_masked_images_paths=inference_results_df['masked_images'].tolist(),
         instance_clothes_images_paths=inference_results_df['clothes_images'].tolist(),
         instance_masks_images_paths=inference_results_df['mask_images'].tolist(),
+        instance_clothes_masks_images_paths=inference_results_df['clothes_mask_images'].tolist(),
+        clothes_version=args.clothes_version
     )
 
     eval_dataloader = torch.utils.data.DataLoader(
-        eval_dataset, batch_size=args.eval_batch_size, shuffle=True, collate_fn=collate_fn
+        eval_dataset, batch_size=args.eval_batch_size, shuffle=False, collate_fn=collate_fn
     )
 
     # Place models on device
@@ -233,42 +248,73 @@ def main():
     with torch.no_grad():
         for idx, batch in enumerate(eval_dataloader):
             print(f"Batch {idx}")
-            image=batch["pixel_values"]
-            mask_image=batch["masks"][0][0]
-            batch["pixel_values"] = batch["pixel_values"].to(device, dtype=weight_dtype)
-            batch["masks"] = batch["masks"].to(device, dtype=weight_dtype)
-            batch["clothes_pixel_values"] = batch["clothes_pixel_values"].to(device, dtype=weight_dtype)
+            if args.clothes_version in ['v1', 'v2', 'v3', 'v4']:
+                image=batch["pixel_values"]
+                mask_image=batch["masks"][0][0]
+                batch["pixel_values"] = batch["pixel_values"].to(device, dtype=weight_dtype)
+                batch["masks"] = batch["masks"].to(device, dtype=weight_dtype)
+                batch["clothes_pixel_values"] = batch["clothes_pixel_values"].to(device, dtype=weight_dtype)
+                batch["instance_clothes_masks"][0] = batch["instance_clothes_masks"][0].to(device, dtype=weight_dtype)
             for i, t in enumerate(timesteps):
                 # print(i, t)
                 if i == 0:
                     prompt_embeds = None 
-                    clothes_latents, latents, mask, masked_image_latents, prompt_embeds, _ = get_init_latents(
-                        vae=vae, pipeline=pipeline, unet=clothes_unet, batch=batch, image=image, mask_image=mask_image, height=height, width=width, generator=generator, 
-                        prompt=prompt, device=device, num_images_per_prompt=num_images_per_prompt, do_classifier_free_guidance=do_classifier_free_guidance, strength=strength, 
-                        negative_prompt=negative_prompt, lora_scale=text_encoder_lora_scale, prompt_embeds=prompt_embeds, negative_prompt_embeds=negative_prompt_embeds, t=t, batch_size=batch_size, weight_dtype=weight_dtype, 
-                        )
+                    if args.clothes_version == 'v1':
+                        clothes_latents, latents, mask, masked_image_latents, prompt_embeds, _ = get_init_latents(
+                            vae=vae, pipeline=pipeline, unet=clothes_unet, batch=batch, image=image, mask_image=mask_image, height=height, width=width, generator=generator, 
+                            prompt=prompt, device=device, num_images_per_prompt=num_images_per_prompt, do_classifier_free_guidance=do_classifier_free_guidance, strength=strength, 
+                            negative_prompt=negative_prompt, lora_scale=text_encoder_lora_scale, prompt_embeds=prompt_embeds, negative_prompt_embeds=negative_prompt_embeds, t=t, batch_size=batch_size, weight_dtype=weight_dtype, 
+                            )
+                    elif args.clothes_version in ['v2', 'v3', 'v4']:
+                        clothes_latents, latents, mask, masked_image_latents, _, _, prompt_embeds, _ = get_init_latents(
+                            vae=vae, pipeline=pipeline, unet=clothes_unet, batch=batch, image=image, mask_image=mask_image, height=height, width=width, generator=generator, 
+                            prompt=prompt, device=device, num_images_per_prompt=num_images_per_prompt, do_classifier_free_guidance=do_classifier_free_guidance, strength=strength, 
+                            negative_prompt=negative_prompt, lora_scale=text_encoder_lora_scale, prompt_embeds=prompt_embeds, negative_prompt_embeds=negative_prompt_embeds, t=t, batch_size=batch_size, weight_dtype=weight_dtype, 
+                            clothes_version=args.clothes_version)
+                    else: 
+                        raise NotImplementedError("Get initial latents not implemented for clothes version {}".format(args.clothes_version))
 
-                latent_model_input = torch.cat([clothes_latents, latents], dim=1)
-                latent_model_input = torch.cat([latent_model_input] * 2) if do_classifier_free_guidance else latent_model_input
 
-                latent_model_input = pipeline.scheduler.scale_model_input(latent_model_input, t)
+                if args.clothes_version == 'v1':
+                    latent_model_input = torch.cat([clothes_latents, latents], dim=1)
+                    latent_model_input = torch.cat([latent_model_input] * 2) if do_classifier_free_guidance else latent_model_input
 
-                # if pipeline.unet.config.in_channels == num_in:
-                latent_model_input = torch.cat([latent_model_input, mask, masked_image_latents], dim=1)
+                    latent_model_input = pipeline.scheduler.scale_model_input(latent_model_input, t)
 
-                noise_pred = clothes_unet(latent_model_input,
-                        t,
-                        encoder_hidden_states=prompt_embeds,
-                        cross_attention_kwargs=cross_attention_kwargs,
-                        return_dict=False,
-                    )[0]
-                                    # compute the previous noisy sample x_t -> x_t-1
+                    # if pipeline.unet.config.in_channels == num_in:
+                    latent_model_input = torch.cat([latent_model_input, mask, masked_image_latents], dim=1)
+
+                    noise_pred = clothes_unet(latent_model_input,
+                            t,
+                            encoder_hidden_states=prompt_embeds,
+                            cross_attention_kwargs=cross_attention_kwargs,
+                            return_dict=False,
+                        )[0]
+                elif args.clothes_version in ['v2', 'v3', 'v4']:
+                    latent_model_input = torch.cat([latents], dim=1)
+                    latent_model_input = torch.cat([latent_model_input] * 2) if do_classifier_free_guidance else latent_model_input
+                    latent_model_input = pipeline.scheduler.scale_model_input(latent_model_input, t)
+
+                    latent_model_input = torch.cat([latent_model_input, mask, masked_image_latents], dim=1)
+                    noise_pred = clothes_unet(latent_model_input,
+                            t,
+                            clothes_latent=torch.cat([clothes_latents, clothes_latents]),
+                            encoder_hidden_states=prompt_embeds,
+                            cross_attention_kwargs=cross_attention_kwargs,
+                            return_dict=False,
+                        )[0]
+                                        # compute the previous noisy sample x_t -> x_t-1
                 kwargs = {'eta': 0, 'generator': None}
                 if do_classifier_free_guidance:
                     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
                     noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
                 latents = pipeline.scheduler.step(noise_pred, t, latents, **kwargs, return_dict=False)[0] #noise_scheduler.step(noise_pred, t, latents, return_dict=False)[0]
-                clothes_latents = pipeline.scheduler.step(noise_pred, t, clothes_latents, **kwargs, return_dict=False)[0]
+                if args.clothes_version == 'v1':
+                    clothes_latents = pipeline.scheduler.step(noise_pred, t, clothes_latents, **kwargs, return_dict=False)[0]
+                elif args.clothes_version in ['v2', 'v3', 'v4']:
+                    pass
+                else:
+                    raise NotImplementedError("Clothes Latent processing not implemented for clothes model version {}".format(args.clothes_version))
 
 
             image =  vae.decode(latents.to(weight_dtype) / vae.config.scaling_factor, return_dict=False)[0]

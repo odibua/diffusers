@@ -5,7 +5,7 @@ export INSTANCE_TARGET_DIR="/content/drive/Othercomputers/ohi-mac/diffusers/test
 export INSTANCE_CLOTHES_DIR="/content/drive/Othercomputers/ohi-mac/diffusers/test_data/clothes"
 export INPAINT_MASK_DIR="/content/drive/Othercomputers/ohi-mac/diffusers/test_data/inpaint_mask"
 export INSTANCE_CLOTHES_MASK_DIR="/content/drive/Othercomputers/ohi-mac/diffusers/test_data/clothes_mask"
-export OUTPUT_DIR="/content/drive/MyDrive/clothestest-v3-6-samples"
+export OUTPUT_DIR="/content/drive/MyDrive/clothestest-v3-150-samples"
 
 # export INSTANCE_MASKED_DIR="/content/drive/Othercomputers/ohi-mac/diffusers/test_data/swim_outlet/image"
 # export INSTANCE_TARGET_DIR="/content/drive/Othercomputers/ohi-mac/diffusers/test_data/swim_outlet/target"

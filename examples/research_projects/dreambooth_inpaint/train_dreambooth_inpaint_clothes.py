@@ -190,7 +190,7 @@ def parse_args():
     parser.add_argument(
         "--num_loops_per_example",
         type=int,
-        default=5,
+        default=1,
         help=(
             "Number of times a training loop is iterated on for a single piece of clothing"
         ),
@@ -378,7 +378,7 @@ class ClothesDataset(Dataset):
         instance_masked_images_paths: List[str] = None,
         instance_clothes_images_paths: List[str] = None,
         instance_masks_images_paths: List[str] = None,
-        instnace_clothes_masks_images_paths: List[str] = None,
+        instance_clothes_masks_images_paths: List[str] = None,
         size: int = 512,
         center_crop: bool = False,
         clothes_version: str = 'v1'
@@ -409,7 +409,7 @@ class ClothesDataset(Dataset):
                 if not self.instance_clothes_mask_root.exists():
                     raise ValueError("Instance clothes mask root doesn't exists.")
 
-            self.instance_target_images_path = list(Path(instance_target_root).iterdir()) * 500
+            self.instance_target_images_path = list(Path(instance_target_root).iterdir()) 
             instance_clothes_images_paths = [Path(instance_clothes_root) / target_image_path.name for target_image_path in self.instance_target_images_path] 
             instance_masks_images_paths = [Path(instance_mask_root) / target_image_path.name for target_image_path in self.instance_target_images_path] 
             instance_masked_images_paths = [Path(instance_masked_root) / target_image_path.name for target_image_path in self.instance_target_images_path] 
