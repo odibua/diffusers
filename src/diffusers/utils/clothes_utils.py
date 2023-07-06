@@ -26,7 +26,9 @@ from diffusers import (
     DDPMScheduler,
     StableDiffusionInpaintClothesPipeline,
     UNet2DConditionModel, 
-    UNet2DConditionClotheLatentsnModel
+    UNet2DConditionClothesLatentsModel,
+    UNet2DConditionClothesInterpLatentsModel,
+    UNet2DConditionClothesConvLatentsModel
 )
 from diffusers.utils import check_min_version
 from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_inpaint_clothes import _prepare_mask_and_masked_image
@@ -95,7 +97,23 @@ def get_models(torch_dtype: torch.dtype, pretrained_name: str, get_list: List[st
             unet = add_clothes_channel_to_unet(unet)
             models_dict.update({'unet': unet})
         elif clothes_version == 'v2':
-            unet = UNet2DConditionClotheLatentsnModel.from_pretrained(
+            unet = UNet2DConditionClothesLatentsModel.from_pretrained(
+                                                                        pretrained_name, 
+                                                                        subfolder="unet", 
+                                                                        low_cpu_mem_usage=False,
+                                                                        device_map=None
+                                                                    )
+            models_dict.update({'unet': unet})
+        elif clothes_version == "v3":
+            unet = UNet2DConditionClothesInterpLatentsModel.from_pretrained(
+                                                                        pretrained_name, 
+                                                                        subfolder="unet", 
+                                                                        low_cpu_mem_usage=False,
+                                                                        device_map=None
+                                                                    )
+            models_dict.update({'unet': unet})
+        elif clothes_version == "v4":
+            unet = UNet2DConditionClothesConvLatentsModel.from_pretrained(
                                                                         pretrained_name, 
                                                                         subfolder="unet", 
                                                                         low_cpu_mem_usage=False,
@@ -171,7 +189,7 @@ def get_collate_function(tokenizer: CLIPTokenizer, clothes_version: str = "v1") 
             masks.append(mask)
             masked_images.append(masked_image)
 
-            if clothes_version == "v2":
+            if clothes_version in ['v2', 'v3', 'v4']:
                 clothes_mask = example["PIL_instance_clothes_masks"]
                 clothes_mask, _ = prepare_mask_and_masked_image(pil_image, clothes_mask)
                 clothes_masks.append(clothes_mask)
@@ -191,7 +209,7 @@ def get_collate_function(tokenizer: CLIPTokenizer, clothes_version: str = "v1") 
             target_pixel_values = target_pixel_values.to(memory_format=torch.contiguous_format).float()
             if clothes_version == "v1":
                 batch = {"input_ids": input_ids, "pixel_values": pixel_values, "target_pixel_values": target_pixel_values, "clothes_pixel_values": clothes_pixel_values, "masks": masks, "masked_images": masked_images}
-            elif clothes_version == "v2":
+            elif clothes_version in ["v2", "v3", "v4"]:
                 batch = {"input_ids": input_ids, "pixel_values": pixel_values, "target_pixel_values": target_pixel_values, "clothes_pixel_values": clothes_pixel_values, "instance_clothes_masks": clothes_masks, "masks": masks, "masked_images": masked_images}
             else:
                 raise NotImplementedError("Batch return not implemented for clothes version {}".format(clothes_version))
@@ -304,7 +322,7 @@ def get_init_latents(
         mask, masked_image, init_image = _prepare_mask_and_masked_image(
                         image, mask_image, height, width, return_image=True
                     )
-        if clothes_version == 'v2':
+        if clothes_version in ['v2', 'v3', 'v4']:
            clothes_mask, clothes_masked_image, clothes_init_image = _prepare_mask_and_masked_image(
                         batch['clothes_pixel_values'], batch['instance_clothes_masks'][0], height, width, return_image=True
                     ) 
@@ -342,7 +360,7 @@ def get_init_latents(
                 return_image_latents=return_image_latents,
             )
             latents, clothes_latents, _ = latents_outputs
-        elif clothes_version == "v2":
+        elif clothes_version in ['v2', 'v3', 'v4']:
             latents_outputs = pipeline.prepare_latents(
                             batch_size * num_images_per_prompt,
                             num_channels_latents,
@@ -372,7 +390,7 @@ def get_init_latents(
                             do_classifier_free_guidance,
                         )
         
-        if clothes_version == 'v2':
+        if clothes_version in ['v2', 'v3', 'v4']:
             clothes_mask, clothes_masked_image_latents = pipeline.prepare_mask_latents(
                     clothes_mask,
                     clothes_masked_image,
@@ -387,5 +405,5 @@ def get_init_latents(
 
         if clothes_version == 'v1':
             return clothes_latents, latents, mask, masked_image_latents, prompt_embeds, target_latents
-        elif clothes_version == 'v2':
+        elif clothes_version in ['v2', 'v3', 'v4']:
             return clothes_latents, latents, mask, masked_image_latents, clothes_mask, clothes_masked_image_latents, prompt_embeds, target_latents
