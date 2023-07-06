@@ -1,0 +1,6 @@
+masked_images,clothes_images,mask_images
+/content/drive/Othercomputers/ohi-mac/diffusers/test_data/image/00000_00.jpg,/content/drive/Othercomputers/ohi-mac/diffusers/test_data/clothes/00000_00.jpg,/content/drive/Othercomputers/ohi-mac/diffusers/test_data/inpaint_mask/00000_00.jpg
+/content/drive/Othercomputers/ohi-mac/diffusers/test_data/image/00000_00.jpg,/content/drive/Othercomputers/ohi-mac/diffusers/test_data/clothes/00001_00.jpg,/content/drive/Othercomputers/ohi-mac/diffusers/test_data/inpaint_mask/00000_00.jpg
+/content/drive/Othercomputers/ohi-mac/diffusers/test_data/image/00000_00.jpg,/content/drive/Othercomputers/ohi-mac/diffusers/test_data/clothes/00012_00.jpg,/content/drive/Othercomputers/ohi-mac/diffusers/test_data/inpaint_mask/00000_00.jpg
+/content/drive/Othercomputers/ohi-mac/diffusers/test_data/image/00000_00.jpg,/content/drive/Othercomputers/ohi-mac/diffusers/test_data/clothes/00046_00.jpg,/content/drive/Othercomputers/ohi-mac/diffusers/test_data/inpaint_mask/00000_00.jpg
+/content/drive/Othercomputers/ohi-mac/diffusers/test_data/image/00000_00.jpg,/content/drive/Othercomputers/ohi-mac/diffusers/test_data/clothes/00066_00.jpg,/content/drive/Othercomputers/ohi-mac/diffusers/test_data/inpaint_mask/00000_00.jpg
